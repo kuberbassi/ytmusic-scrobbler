@@ -12,6 +12,10 @@ import secrets
 import requests
 import threading
 
+# Global Sync State
+scrobble_lock = threading.Lock()
+last_sync_time = 0
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
@@ -22,18 +26,36 @@ def load_scrobbles():
     if os.path.exists(SCROBBLED_FILE):
         try:
             with open(SCROBBLED_FILE, "r") as f:
-                return set(json.load(f))
+                data = json.load(f)
+                # Convert back to set for track_id checks, handle legacy lists
+                if isinstance(data, list): return set(data), {}
+                return set(data.get('history', [])), data.get('last_meta', {})
         except:
-            return set()
-    return set()
+            return set(), {}
+    return set(), {}
 
-def save_scrobble(track_uid):
-    current = load_scrobbles()
-    current.add(track_uid)
+def save_scrobble(track_uid, meta=None):
+    history, last_meta = load_scrobbles()
+    history.add(track_uid)
+    if meta: last_meta.update(meta)
+    
     with open(SCROBBLED_FILE, "w") as f:
-        json.dump(list(current), f)
+        json.dump({'history': list(history), 'last_meta': last_meta}, f)
 
 scrobbled_tracks = load_scrobbles()
+
+def get_track_duration(yt_track):
+    """Safely extract duration in seconds from YTMusic track object"""
+    try:
+        duration_str = yt_track.get('duration')
+        if not duration_str: return 180 # Default 3 mins
+        if ':' in duration_str:
+            parts = list(map(int, duration_str.split(':')))
+            if len(parts) == 2: return parts[0] * 60 + parts[1]
+            if len(parts) == 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        return int(duration_str)
+    except:
+        return 180
 
 # Configuration Persistence
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
@@ -363,6 +385,9 @@ HTML_TEMPLATE = '''
         .footer a { color: var(--text-secondary); text-decoration: none; }
         .footer a:hover { color: var(--text-primary); }
 
+        .sync-info { font-size: 11px; margin-top: 12px; color: var(--text-tertiary); text-align: center; }
+        .sync-info.active { color: var(--success); }
+
         /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -463,21 +488,25 @@ HTML_TEMPLATE = '''
                     <button class="btn btn-secondary btn-sm" onclick="checkStatus()">Refresh</button>
                 </div>
                 <div class="card-body">
-                    <div class="status-item">
-                        <div class="status-left">
-                            <div class="status-icon lastfm">L</div>
-                            <span class="status-name">Last.fm</span>
-                        </div>
-                        <span class="status-badge offline" id="lastfm-badge"><span class="dot"></span>Not Connected</span>
+                <div class="status-item">
+                    <div class="status-left">
+                        <div class="status-icon lastfm">L</div>
+                        <div class="status-name">Last.fm</div>
                     </div>
-                    <div class="status-item">
-                        <div class="status-left">
-                            <div class="status-icon ytmusic">Y</div>
-                            <span class="status-name">YouTube Music</span>
-                        </div>
-                        <span class="status-badge offline" id="ytmusic-badge"><span class="dot"></span>Not Connected</span>
+                    <div id="lastfm-status" class="status-badge offline">
+                        <span class="dot"></span> Offline
                     </div>
                 </div>
+                <div class="status-item">
+                    <div class="status-left">
+                        <div class="status-icon ytmusic">Y</div>
+                        <div class="status-name">YouTube Music</div>
+                    </div>
+                    <div id="ytmusic-status" class="status-badge offline">
+                        <span class="dot"></span> Offline
+                    </div>
+                </div>
+                <div id="sync-info" class="sync-info">Waiting for sync...</div>
             </div>
 
             <div class="card">
@@ -650,7 +679,7 @@ HTML_TEMPLATE = '''
             l.innerHTML = `<div class="log-entry"><span class="time">[${time}]</span> ${msg}</div>` + l.innerHTML;
         }
 
-        // Status
+        let lastSyncTimestamp = 0;
         async function checkStatus() {
             try {
                 const res = await fetch('/api/status', {
@@ -660,14 +689,33 @@ HTML_TEMPLATE = '''
                 });
                 const data = await res.json();
                 
-                const lfm = document.getElementById('lastfm-badge');
-                lfm.innerHTML = `<span class="dot"></span>${data.lastfm.connected ? 'Connected' : 'Not Connected'}`;
+                // Auto-refresh history if server has synced
+                if (data.last_sync > lastSyncTimestamp) {
+                    lastSyncTimestamp = data.last_sync;
+                    loadHistory();
+                    if (data.last_track) log('Synced: ' + data.last_track);
+                }
+
+                // Update Status Badges
+                const lfm = document.getElementById('lastfm-status');
+                lfm.innerHTML = `<span class="dot"></span>${data.lastfm.connected ? 'Online' : 'Offline'}`;
                 lfm.className = `status-badge ${data.lastfm.connected ? 'online' : 'offline'}`;
                 
-                const ytm = document.getElementById('ytmusic-badge');
-                ytm.innerHTML = `<span class="dot"></span>${data.ytmusic.connected ? 'Connected' : 'Not Connected'}`;
+                const ytm = document.getElementById('ytmusic-status');
+                ytm.innerHTML = `<span class="dot"></span>${data.ytmusic.connected ? 'Online' : 'Offline'}`;
                 ytm.className = `status-badge ${data.ytmusic.connected ? 'online' : 'offline'}`;
-            } catch (e) { console.error(e); }
+
+                // Update Sync Info text
+                const syncInfo = document.getElementById('sync-info');
+                if (data.last_sync > 0) {
+                    const diff = Math.floor((data.now - data.last_sync) / 60);
+                    syncInfo.innerText = diff === 0 ? 'Synced just now' : `Synced ${diff}m ago`;
+                    syncInfo.className = 'sync-info active';
+                } else {
+                    syncInfo.innerText = 'Waiting for first sync...';
+                    syncInfo.className = 'sync-info';
+                }
+            } catch (e) { console.error('Status check failed', e); }
         }
 
         // Save Last.fm
@@ -1107,7 +1155,15 @@ def status():
     else:
         ytmusic_status = {'connected': False}
     
-    return jsonify({'lastfm': lastfm_status, 'ytmusic': ytmusic_status})
+    global last_sync_time
+    history, meta = load_scrobbles()
+    return jsonify({
+        'lastfm': lastfm_status, 
+        'ytmusic': ytmusic_status,
+        'last_sync': last_sync_time,
+        'now': int(time.time()),
+        'last_track': meta.get('track_title')
+    })
 
 
 @app.route('/api/history', methods=['POST'])
@@ -1156,7 +1212,7 @@ def scrobble():
     try:
         # Load fresh from disk
         global scrobbled_tracks
-        scrobbled_tracks = load_scrobbles()
+        scrobbled_tracks, last_meta = load_scrobbles()
         
         # Optional: Sync with Last.fm if scrobbled_tracks is small or on demand
         # To keep it "fast and smooth", we only do this if it hasn't been done this session
@@ -1184,19 +1240,31 @@ def scrobble():
             track_uid = item.get('videoId') or f"{title}_{artist}"
             
             if track_uid in scrobbled_tracks:
-                continue
+                # SMART REPEAT DETECTION
+                # If it's the SAME track as last scrobble, and enough time has passed
+                last_time = last_meta.get('timestamp', 0)
+                duration = get_track_duration(item)
+                if last_meta.get('uid') == track_uid and (current_time - last_time) > duration:
+                    # It's a repeat! Allow to fall through and scrobble again
+                    pass
+                else:
+                    continue
             
             try:
-                timestamp = current_time - (i * 180)
-                network.scrobble(
-                    artist=artist,
-                    title=title,
-                    timestamp=timestamp,
-                    album=album if album else None
-                )
-                scrobbled_tracks.add(track_uid)
-                save_scrobble(track_uid)
-                scrobbled_count += 1
+                with scrobble_lock:
+                    timestamp = current_time - (i * 180)
+                    network.scrobble(
+                        artist=artist,
+                        title=title,
+                        timestamp=timestamp,
+                        album=album if album else None
+                    )
+                    save_scrobble(track_uid, {
+                        'uid': track_uid,
+                        'timestamp': timestamp,
+                        'track_title': title
+                    })
+                    scrobbled_count += 1
             except Exception as e:
                 print(f"Error scrobbling {title}: {e}")
         
@@ -1218,16 +1286,17 @@ class BackgroundScrobbler:
             interval = int(config.get('interval', 300))
             
             if auto_enabled:
-                print(f"[INFO] Background Sync: Starting... (Interval: {interval}s)")
-                try:
-                    # Reuse the scrobble logic but in a fake request context or directly
-                    # For simplicity, we'll call a helper that doesn't rely on Flask's 'request'
-                    self._perform_sync(config)
-                except Exception as e:
-                    print(f"[ERROR] Background Sync failed: {e}")
+                now = time.time()
+                # Responsive check: Has the interval passed? 
+                if now - last_sync_time >= interval:
+                    print(f"[INFO] Background Sync: Starting... (Interval: {interval}s)")
+                    try:
+                        self._perform_sync(config)
+                    except Exception as e:
+                        print(f"[ERROR] Background Sync failed: {e}")
             
-            # Wait for interval or stop event
-            self.stop_event.wait(interval)
+            # Wake up every 5s to check for config changes/interval
+            self.stop_event.wait(5)
 
     def _perform_sync(self, config):
         network, _ = get_lastfm_network(config)
@@ -1236,8 +1305,7 @@ class BackgroundScrobbler:
         if not network or not ytmusic:
             return
             
-        global scrobbled_tracks
-        scrobbled_tracks = load_scrobbles()
+        history_set, last_meta = load_scrobbles()
         
         history = ytmusic.get_history()
         current_time = int(time.time())
@@ -1249,23 +1317,36 @@ class BackgroundScrobbler:
             album = item.get('album', {}).get('name', '') if item.get('album') else ''
             track_uid = item.get('videoId') or f"{title}_{artist}"
             
-            if track_uid in scrobbled_tracks:
-                continue
+            if track_uid in history_set:
+                # SMART REPEAT DETECTION
+                last_time = last_meta.get('timestamp', 0)
+                duration = get_track_duration(item)
+                if last_meta.get('uid') == track_uid and (current_time - last_time) > duration:
+                    pass
+                else:
+                    continue
             
             try:
-                timestamp = current_time - (i * 180)
-                network.scrobble(
-                    artist=artist,
-                    title=title,
-                    timestamp=timestamp,
-                    album=album if album else None
-                )
-                save_scrobble(track_uid)
-                scrobbled_count += 1
+                with scrobble_lock:
+                    timestamp = current_time - (i * 180)
+                    network.scrobble(
+                        artist=artist,
+                        title=title,
+                        timestamp=timestamp,
+                        album=album if album else None
+                    )
+                    save_scrobble(track_uid, {
+                        'uid': track_uid,
+                        'timestamp': timestamp,
+                        'track_title': title
+                    })
+                    scrobbled_count += 1
             except:
                 pass
         
         if scrobbled_count > 0:
+            global last_sync_time
+            last_sync_time = int(time.time())
             print(f"[INFO] Background Sync: Scrobbled {scrobbled_count} tracks")
 
     def start(self):
