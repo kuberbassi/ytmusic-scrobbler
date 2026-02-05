@@ -8,7 +8,7 @@ import json
 import time
 import requests
 from typing import Optional, Dict, Any, Tuple, Set
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
@@ -230,13 +230,17 @@ def get_all_active_users(batch_size: int = 100, offset: int = 0) -> list:
         headers = get_headers()
         headers['Range'] = f'{offset}-{offset + batch_size - 1}'
         
+        # Calculate cutoff time (4 min ago) to prevent double-sync
+        cutoff_time = (datetime.utcnow() - timedelta(minutes=4)).isoformat()
+        
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/users",
             params={
                 'is_active': 'eq.true',
                 'settings->>auto_scrobble': 'eq.true',
-                'select': 'id,google_id,google_email,lastfm_username,lastfm_api_key,lastfm_api_secret,lastfm_session_key,ytmusic_headers,settings',
-                'order': 'last_sync_at.asc.nullsfirst'  # Prioritize users who haven't synced recently
+                'select': 'id,google_id,google_email,lastfm_username,lastfm_api_key,lastfm_api_secret,lastfm_session_key,ytmusic_headers,settings,last_sync_at',
+                'order': 'last_sync_at.asc.nullsfirst',  # Prioritize users who haven't synced recently
+                'or': f'(last_sync_at.is.null,last_sync_at.lt.{cutoff_time})'  # Skip users synced in last 4 min
             },
             headers=headers,
             timeout=30

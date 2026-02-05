@@ -833,16 +833,10 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="toggle-row">
                         <div class="toggle-info">
-                            <h3>Check Interval</h3>
-                            <p>How often to sync new tracks</p>
+                            <h3>Sync Interval</h3>
+                            <p>Checks every 5 minutes (server cron)</p>
                         </div>
-                        <select class="form-select" id="interval-select" onchange="updateInterval()">
-                            <option value="60">1 min</option>
-                            <option value="180">3 min</option>
-                            <option value="300" selected>5 min</option>
-                            <option value="600">10 min</option>
-                            <option value="900">15 min</option>
-                        </select>
+                        <span style="color:var(--text-secondary);font-size:14px;">5 min</span>
                     </div>
                 </div>
             </div>
@@ -1204,25 +1198,19 @@ HTML_TEMPLATE = '''
             await saveConfigToServer();
         }
 
-        async function updateInterval() {
-            const sec = parseInt(document.getElementById('interval-select').value);
-            localStorage.setItem('interval', sec);
-            toast(`Interval: ${sec/60} min`, 'info');
-            await saveConfigToServer();
-        }
+        // Interval is fixed at 5 minutes (server cron)
 
         // Server Config Sync
         async function saveConfigToServer() {
             const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
             const yt_headers = localStorage.getItem('yt_headers');
             const auto_scrobble = localStorage.getItem('autoScrobble') === 'true';
-            const interval = parseInt(document.getElementById('interval-select').value);
             
             const config = {
                 lastfm: lastfm,
                 ytmusic: { headers: yt_headers },
                 auto_scrobble: auto_scrobble,
-                interval: interval
+                interval: 300  // Fixed 5 min (server cron)
             };
             
             try {
@@ -1253,10 +1241,7 @@ HTML_TEMPLATE = '''
                     document.getElementById('yt-headers').value = config.ytmusic.headers;
                 }
                 
-                if (config.interval) {
-                    localStorage.setItem('interval', config.interval);
-                    document.getElementById('interval-select').value = config.interval;
-                }
+                // Interval is fixed at 5 min (server cron)
                 
                 if (config.auto_scrobble !== undefined) {
                     localStorage.setItem('autoScrobble', config.auto_scrobble ? 'true' : 'false');
@@ -1273,7 +1258,6 @@ HTML_TEMPLATE = '''
                 if (lastfm.api_key) document.getElementById('lastfm-key').value = lastfm.api_key;
                 if (lastfm.api_secret) document.getElementById('lastfm-secret').value = lastfm.api_secret;
                 if (lastfm.session_key) document.getElementById('lastfm-session').value = lastfm.session_key;
-                if (interval) document.getElementById('interval-select').value = interval;
                 if (yt_headers) document.getElementById('yt-headers').value = yt_headers;
                 if (autoEnabled) document.getElementById('auto-toggle').classList.add('active');
             }
@@ -1867,15 +1851,20 @@ def scrobble():
                     scrobbled_count += 1
             except pylast.WSError as e:
                 print(f"[ERROR] Last.fm API error for '{title}': {e}")
-                add_sync_log(artist, title, status=f"API: {str(e)[:12]}", user=username)
+                add_sync_log(artist, title, status=f"API: {str(e)[:20]}", user=username)
             except Exception as e:
                 print(f"[ERROR] Scrobble failed for '{title}': {e}")
-                add_sync_log(artist, title, status=f"Err: {str(e)[:12]}", user=username)
+                add_sync_log(artist, title, status=f"Err: {str(e)[:20]}", user=username)
         
         status_msg = f"Scrobbled {scrobbled_count}" if scrobbled_count > 0 else "No new tracks"
         add_sync_log("System", status_msg, status="Done", user=username)
         global last_sync_time
         last_sync_time = int(time.time())
+        
+        # Update last_sync_at in DB to prevent cron from double-syncing
+        if user_id:
+            update_user_last_sync(user_id)
+        
         return jsonify({'success': True, 'count': scrobbled_count})
     except Exception as e:
         import traceback
@@ -1981,15 +1970,17 @@ class BackgroundScrobbler:
 
             try:
                 with scrobble_lock:
+                    # Use different timestamps for each track to avoid Last.fm deduplication
+                    timestamp = current_time - (i * 60)  # 1 minute apart
                     network.scrobble(
                         artist=artist,
                         title=title,
-                        timestamp=current_time,
+                        timestamp=timestamp,
                         album=album if album else None
                     )
                     # Save ALL UIDs to prevent duplicates
                     scrobble_meta = {
-                        'timestamp': current_time,
+                        'timestamp': timestamp,
                         'track_title': title,
                         'artist': artist
                     }
