@@ -1,0 +1,28 @@
+# Environment
+.env
+.env.local
+oauth.json
+browser.json
+headers_auth.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Vercel
+.vercel
+
+# OS
+.DS_Store
+Thumbs.db
