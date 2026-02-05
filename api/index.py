@@ -46,6 +46,9 @@ def load_scrobbles():
             return set(), {}
     return set(), {}
 
+# Initial Load
+scrobbled_tracks, track_meta_map = load_scrobbles()
+
 def save_scrobble(track_uid, meta=None):
     history, track_meta = load_scrobbles()
     history.add(track_uid)
@@ -56,7 +59,8 @@ def save_scrobble(track_uid, meta=None):
     with open(SCROBBLED_FILE, "w") as f:
         json.dump({'history': list(history), 'track_meta': track_meta}, f)
 
-scrobbled_tracks = load_scrobbles()
+# Initial Load
+scrobbled_tracks, track_meta_map = load_scrobbles()
 
 def get_track_duration(yt_track):
     """Safely extract duration in seconds from YTMusic track object"""
@@ -1249,7 +1253,7 @@ def scrobble():
     
     try:
         # Load fresh from disk
-        global scrobbled_tracks
+        global scrobbled_tracks, track_meta_map
         scrobbled_tracks, track_meta_map = load_scrobbles()
         
         # Optional: Sync with Last.fm
@@ -1308,6 +1312,9 @@ def scrobble():
             except Exception as e:
                 add_sync_log(artist, title, status=f"Err: {str(e)[:15]}")
         
+        add_sync_log("System", "Manual sync completed", status="Done")
+        global last_sync_time
+        last_sync_time = int(time.time())
         return jsonify({'success': True, 'count': scrobbled_count})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1339,6 +1346,10 @@ class BackgroundScrobbler:
             self.stop_event.wait(5)
 
     def _perform_sync(self, config):
+        global last_sync_time
+        last_sync_time = int(time.time()) # Update immediately to prevent spamming
+        add_sync_log("System", "Starting background sync...", status="Check")
+        
         network, _ = get_lastfm_network(config)
         ytmusic, _ = get_ytmusic_client(config)
         if not network or not ytmusic: return
@@ -1387,11 +1398,10 @@ class BackgroundScrobbler:
                     add_sync_log(artist, title, status="Loop" if track_uid in history_set else "Synced")
                     scrobbled_count += 1
             except Exception as e:
-                print(f"Bkg sync err: {e}")
+                print(f"Background scrobble error: {e}")
+                add_sync_log(artist, title, status="Error")
         
         if scrobbled_count > 0:
-            global last_sync_time
-            last_sync_time = int(time.time())
             print(f"[INFO] Background Sync: Scrobbled {scrobbled_count} tracks")
 
     def start(self):
