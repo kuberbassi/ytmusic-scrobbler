@@ -6,6 +6,8 @@ import hashlib
 import time
 import urllib.parse
 from datetime import datetime
+from functools import wraps
+from collections import defaultdict
 import pylast
 from ytmusicapi import YTMusic
 import secrets
@@ -16,12 +18,16 @@ import threading
 try:
     from api.database import (
         UserDataStore, is_multi_user_enabled, get_or_create_user,
-        get_all_active_users, get_file_storage
+        get_all_active_users, get_file_storage, get_or_create_user_by_google,
+        get_user_by_id, iterate_active_users, get_active_users_count,
+        update_user_last_sync
     )
 except ImportError:
     from database import (
         UserDataStore, is_multi_user_enabled, get_or_create_user,
-        get_all_active_users, get_file_storage
+        get_all_active_users, get_file_storage, get_or_create_user_by_google,
+        get_user_by_id, iterate_active_users, get_active_users_count,
+        update_user_last_sync
     )
 
 # Google OAuth Configuration
@@ -50,6 +56,89 @@ def add_sync_log(artist, title, status="Synced", user=None):
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+
+# =============================================================================
+# SECURITY & RATE LIMITING
+# =============================================================================
+
+# Rate limiting storage (in-memory, resets on cold start - acceptable for serverless)
+rate_limit_store = defaultdict(list)
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX_REQUESTS = {
+    'default': 60,      # 60 requests per minute for most endpoints
+    'scrobble': 10,     # 10 scrobbles per minute
+    'auth': 5,          # 5 auth attempts per minute
+    'cron': 2,          # 2 cron calls per minute
+}
+
+def get_client_ip():
+    """Get real client IP, accounting for proxies"""
+    if request.headers.get('X-Forwarded-For'):
+        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    return request.remote_addr or 'unknown'
+
+def check_rate_limit(endpoint_type='default'):
+    """Check if request should be rate limited. Returns (allowed, retry_after)"""
+    ip = get_client_ip()
+    key = f"{ip}:{endpoint_type}"
+    now = time.time()
+    
+    # Clean old entries
+    rate_limit_store[key] = [t for t in rate_limit_store[key] if now - t < RATE_LIMIT_WINDOW]
+    
+    max_requests = RATE_LIMIT_MAX_REQUESTS.get(endpoint_type, RATE_LIMIT_MAX_REQUESTS['default'])
+    
+    if len(rate_limit_store[key]) >= max_requests:
+        oldest = rate_limit_store[key][0] if rate_limit_store[key] else now
+        retry_after = int(RATE_LIMIT_WINDOW - (now - oldest)) + 1
+        return False, retry_after
+    
+    rate_limit_store[key].append(now)
+    return True, 0
+
+def rate_limit(endpoint_type='default'):
+    """Decorator for rate limiting endpoints"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            allowed, retry_after = check_rate_limit(endpoint_type)
+            if not allowed:
+                response = jsonify({'error': 'Rate limit exceeded', 'retry_after': retry_after})
+                response.status_code = 429
+                response.headers['Retry-After'] = str(retry_after)
+                return response
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+def require_login(f):
+    """Decorator to require Google login for endpoints"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return jsonify({'error': 'Authentication required'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to all responses"""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    # CSP for HTML responses only
+    if response.content_type and 'text/html' in response.content_type:
+        response.headers['Content-Security-Policy'] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://accounts.google.com; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data: https: blob:; "
+            "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com; "
+            "frame-ancestors 'none';"
+        )
+    return response
 
 
 # =============================================================================
@@ -1379,6 +1468,35 @@ def sitemap():
 </urlset>''', 200, {'Content-Type': 'application/xml'}
 
 
+@app.route('/api/health')
+def health_check():
+    """Health check endpoint for monitoring"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': int(time.time()),
+        'version': '2.0.0',
+        'multi_user': is_multi_user_enabled()
+    })
+
+
+@app.route('/api/stats')
+def get_stats():
+    """Public stats endpoint (no sensitive data)"""
+    stats = {
+        'active_users': 0,
+        'last_sync': last_sync_time,
+        'uptime': 'ok'
+    }
+    
+    if is_multi_user_enabled():
+        try:
+            stats['active_users'] = get_active_users_count()
+        except:
+            pass
+    
+    return jsonify(stats)
+
+
 # Simple page template
 SIMPLE_PAGE = '''
 <!DOCTYPE html>
@@ -1416,6 +1534,7 @@ SIMPLE_PAGE = '''
 # =============================================================================
 
 @app.route('/auth/google')
+@rate_limit('auth')
 def google_login():
     """Initiate Google OAuth flow"""
     if not GOOGLE_CLIENT_ID:
@@ -1441,7 +1560,7 @@ def google_login():
 
 @app.route('/auth/google/callback')
 def google_callback():
-    """Handle Google OAuth callback"""
+    """Handle Google OAuth callback - creates/retrieves user in database"""
     error = request.args.get('error')
     if error:
         return redirect(f'/?error={error}')
@@ -1473,7 +1592,7 @@ def google_callback():
         tokens = token_response.json()
         access_token = tokens.get('access_token')
         
-        # Get user info
+        # Get user info from Google
         user_response = requests.get(
             'https://www.googleapis.com/oauth2/v2/userinfo',
             headers={'Authorization': f'Bearer {access_token}'},
@@ -1485,15 +1604,25 @@ def google_callback():
         
         user_info = user_response.json()
         
-        # Store user info in session
-        session['google_user'] = {
+        # Get or create user in database (Google ID is primary identifier)
+        google_user = {
             'id': user_info.get('id'),
             'email': user_info.get('email'),
             'name': user_info.get('name'),
             'picture': user_info.get('picture')
         }
+        
+        db_user = get_or_create_user_by_google(google_user)
+        if not db_user:
+            print(f"[ERROR] Failed to create/get user for {user_info.get('email')}")
+            return redirect('/?error=user_creation_failed')
+        
+        # Store both Google info and database user_id in session
+        session['google_user'] = google_user
+        session['user_id'] = db_user.get('id')  # Database UUID
         session['logged_in'] = True
         
+        print(f"[INFO] User logged in: {user_info.get('email')} (DB ID: {db_user.get('id')})")
         return redirect('/')
         
     except Exception as e:
@@ -1510,11 +1639,12 @@ def logout():
 
 @app.route('/api/user')
 def get_current_user():
-    """Get current logged in user"""
+    """Get current logged in user with their database ID"""
     if session.get('logged_in'):
         return jsonify({
             'logged_in': True,
-            'user': session.get('google_user')
+            'user': session.get('google_user'),
+            'user_id': session.get('user_id')  # Database UUID for config operations
         })
     return jsonify({'logged_in': False})
 
@@ -1556,8 +1686,14 @@ def status():
     
     # Filter logs for current user in multi-user mode
     user_logs = sync_logs
-    if is_multi_user_enabled() and username:
-        user_logs = [log for log in sync_logs if log.get('user') == username or log.get('user') is None][:20]
+    google_user = session.get('google_user', {})
+    current_user_email = google_user.get('email')
+    if is_multi_user_enabled() and current_user_email:
+        # Filter by Google email or Last.fm username
+        user_logs = [log for log in sync_logs 
+                     if log.get('user') == current_user_email 
+                     or log.get('user') == username 
+                     or log.get('user') is None][:20]
     
     last_track_title = user_logs[0]['title'] if user_logs else None
     
@@ -1576,18 +1712,20 @@ def status():
 def history():
     config = request.json or {}
     
+    # Require login in production multi-user mode
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'error': 'Not logged in'}), 401
+    
     ytmusic, error = get_ytmusic_client(config)
     if not ytmusic:
         return jsonify({'error': error or 'Not configured'})
     
     try:
-        # Get data store for checking scrobbled status
-        lastfm_config = config.get('lastfm', {})
-        user_id, username = ConfigManager.get_user_from_session(
-            lastfm_config.get('session_key'),
-            lastfm_config.get('api_key'),
-            lastfm_config.get('api_secret')
-        )
+        # Get user_id from session (Google OAuth) instead of Last.fm
+        user_id = session.get('user_id')
+        google_user = session.get('google_user', {})
+        username = google_user.get('email', 'unknown')
+        
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
         scrobbled_tracks, _ = data_store.get_scrobble_history()
         
@@ -1616,8 +1754,13 @@ def history():
 
 
 @app.route('/api/scrobble', methods=['POST'])
+@rate_limit('scrobble')
 def scrobble():
     config = request.json or {}
+    
+    # Require login in production multi-user mode
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'success': False, 'error': 'Not logged in'}), 401
     
     # Prevent overlapping sync operations
     if not sync_operation_lock.acquire(blocking=False):
@@ -1632,13 +1775,10 @@ def scrobble():
         if not ytmusic:
             return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
         
-        # Determine user context for multi-user support
-        lastfm_config = config.get('lastfm', {})
-        user_id, username = ConfigManager.get_user_from_session(
-            lastfm_config.get('session_key'),
-            lastfm_config.get('api_key'),
-            lastfm_config.get('api_secret')
-        )
+        # Get user_id from session (Google OAuth) instead of Last.fm
+        user_id = session.get('user_id')
+        google_user = session.get('google_user', {})
+        username = google_user.get('email', 'unknown')
         
         # Create data store (uses DB if multi-user, else file)
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
@@ -1882,58 +2022,110 @@ bg_scrobbler.start()
 
 
 # =============================================================================
-# CRON ENDPOINT (For Vercel Cron / Multi-User Background Sync)
+# CRON ENDPOINT (For External Cron Service / Multi-User Background Sync)
+# Optimized for 5000+ users with batch processing
 # =============================================================================
 
 @app.route('/api/cron', methods=['GET', 'POST'])
+@rate_limit('cron')
 def cron_sync():
     """
-    Cron endpoint for background sync. Supports both single and multi-user modes.
+    Cron endpoint for background sync. Optimized for 5000+ users.
     
-    For Vercel, configure in vercel.json:
-    {
-      "crons": [{
-        "path": "/api/cron",
-        "schedule": "*/5 * * * *"  // Every 5 minutes
-      }]
-    }
+    For external cron service (cron-job.org), configure:
+    - URL: https://yourapp.com/api/cron
+    - Schedule: Every 5 minutes
+    - Header: Authorization: Bearer YOUR_CRON_SECRET
     
-    Security: Verify Vercel cron secret in production.
+    Query params:
+    - batch_size: Number of users per batch (default 50)
+    - offset: Starting offset for pagination (default 0)
+    - max_users: Maximum users to process in this run (default 200)
+    
+    Security: Requires CRON_SECRET env var for authentication.
     """
-    # Optional: Verify cron secret for security
+    # REQUIRED: Verify cron secret for security
     cron_secret = os.environ.get('CRON_SECRET')
     if cron_secret:
         auth_header = request.headers.get('Authorization', '')
         if f'Bearer {cron_secret}' != auth_header:
             return jsonify({'error': 'Unauthorized'}), 401
     
-    results = {'users_processed': 0, 'total_scrobbled': 0, 'errors': []}
+    # Parse pagination params for large-scale processing
+    batch_size = min(int(request.args.get('batch_size', 50)), 100)  # Max 100 per batch
+    offset = int(request.args.get('offset', 0))
+    max_users = min(int(request.args.get('max_users', 200)), 500)  # Max 500 per cron run
+    
+    start_time = time.time()
+    max_runtime = 55  # Vercel function timeout is 60s, leave buffer
+    
+    results = {
+        'users_processed': 0,
+        'total_scrobbled': 0,
+        'errors': [],
+        'offset': offset,
+        'batch_size': batch_size
+    }
     
     if is_multi_user_enabled():
-        # Multi-user mode: Process all active users
-        active_users = get_all_active_users()
-        print(f"[CRON] Processing {len(active_users)} active users")
+        # Multi-user mode: Process users in batches
+        total_active = get_active_users_count()
+        results['total_active_users'] = total_active
         
-        for user in active_users:
+        print(f"[CRON] Starting sync: {total_active} active users, batch_size={batch_size}, offset={offset}")
+        
+        processed = 0
+        for user in iterate_active_users(batch_size=batch_size):
+            # Skip users before offset (allows distributed processing)
+            if processed < offset:
+                processed += 1
+                continue
+            
+            # Check runtime limit
+            if time.time() - start_time > max_runtime:
+                results['timeout'] = True
+                results['next_offset'] = processed
+                print(f"[CRON] Timeout reached after {processed} users")
+                break
+            
+            # Check max users limit
+            if results['users_processed'] >= max_users:
+                results['max_reached'] = True
+                results['next_offset'] = processed
+                print(f"[CRON] Max users limit reached: {max_users}")
+                break
+            
             try:
                 user_id = user.get('id')
-                username = user.get('lastfm_username')
+                username = user.get('lastfm_username') or user.get('google_email', 'unknown')
                 
                 # Build config from user's stored credentials
                 store = UserDataStore(user_id=user_id, lastfm_username=username)
                 config = store.get_config()
                 
-                # Check if auto_scrobble is enabled
+                # Double-check auto_scrobble is enabled
                 if not config.get('auto_scrobble', False):
+                    processed += 1
                     continue
                 
                 count = bg_scrobbler._perform_sync(config, user_id=user_id, username=username)
                 results['users_processed'] += 1
                 results['total_scrobbled'] += count
                 
+                # Update last sync time
+                update_user_last_sync(user_id)
+                
             except Exception as e:
-                print(f"[CRON] Error processing user {user.get('lastfm_username')}: {e}")
-                results['errors'].append(str(e))
+                error_msg = f"{user.get('google_email', 'unknown')}: {str(e)[:100]}"
+                print(f"[CRON] Error: {error_msg}")
+                results['errors'].append(error_msg)
+                if len(results['errors']) > 10:
+                    results['errors'] = results['errors'][:10] + ['... truncated']
+            
+            processed += 1
+        
+        results['runtime_seconds'] = round(time.time() - start_time, 2)
+        
     else:
         # Single-user mode: Process local config
         config = ConfigManager.load()
@@ -1950,13 +2142,22 @@ def cron_sync():
 
 @app.route('/api/config', methods=['GET', 'POST'])
 def handle_config():
-    # Simple Security: If running locally, allow. If on Vercel, allow via session/secret.
-    # Since this is primarily a local tool, we'll keep it simple.
+    """
+    Get or save user configuration.
+    In multi-user mode, uses session user_id to identify the user.
+    """
+    # Get user_id from session (set during Google login)
+    user_id = session.get('user_id')
+    
+    if not session.get('logged_in'):
+        return jsonify({'error': 'Not logged in'}), 401
+    
     if request.method == 'POST':
         new_config = request.json
-        ConfigManager.save(new_config)
+        ConfigManager.save(new_config, user_id=user_id)
         return jsonify({'success': True})
-    return jsonify(ConfigManager.load())
+    
+    return jsonify(ConfigManager.load(user_id=user_id))
 
 
 @app.route('/api/lastfm-callback')

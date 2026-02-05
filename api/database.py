@@ -56,53 +56,135 @@ def is_multi_user_enabled() -> bool:
 def init_database():
     """
     Note: Table creation via REST API requires the SQL Editor in Supabase Dashboard.
-    Run this SQL in Supabase SQL Editor to create tables:
-    
-    CREATE TABLE IF NOT EXISTS users (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        lastfm_username VARCHAR(255) UNIQUE NOT NULL,
-        lastfm_api_key TEXT,
-        lastfm_api_secret TEXT,
-        lastfm_session_key TEXT,
-        ytmusic_headers TEXT,
-        settings JSONB DEFAULT '{"auto_scrobble": false, "interval": 300}'::jsonb,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-    
-    CREATE TABLE IF NOT EXISTS scrobbles (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-        track_uid VARCHAR(512) NOT NULL,
-        track_title TEXT,
-        artist TEXT,
-        last_scrobble_time BIGINT,
-        scrobble_count INT DEFAULT 1,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW(),
-        UNIQUE(user_id, track_uid)
-    );
-    
-    CREATE INDEX IF NOT EXISTS idx_scrobbles_user_id ON scrobbles(user_id);
-    CREATE INDEX IF NOT EXISTS idx_users_lastfm_username ON users(lastfm_username);
-    
-    -- Enable Row Level Security (optional but recommended)
-    ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE scrobbles ENABLE ROW LEVEL SECURITY;
-    
-    -- Allow all operations for now (you can add proper policies later)
-    CREATE POLICY "Allow all for users" ON users FOR ALL USING (true);
-    CREATE POLICY "Allow all for scrobbles" ON scrobbles FOR ALL USING (true);
+    Run schema.sql in Supabase SQL Editor to create tables.
+    See schema.sql for the full production-ready schema with Google OAuth support.
     """
     print("[INFO] Tables must be created via Supabase Dashboard SQL Editor")
-    print("[INFO] See database_rest.py init_database() docstring for SQL")
+    print("[INFO] Run schema.sql for the complete setup")
     return True
 
 
-def get_or_create_user(lastfm_username: str) -> Optional[Dict[str, Any]]:
-    """Get existing user or create a new one"""
+def get_or_create_user_by_google(google_user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Get existing user by Google ID or create a new one.
+    This is the PRIMARY method for user identification.
+    
+    Args:
+        google_user: Dict with 'id', 'email', 'name', 'picture' from Google OAuth
+    
+    Returns:
+        User dict with all fields or None on error
+    """
     if not REST_API_AVAILABLE:
-        return {'id': 'local', 'username': lastfm_username}
+        return {
+            'id': 'local',
+            'google_id': google_user.get('id'),
+            'google_email': google_user.get('email'),
+            'google_name': google_user.get('name')
+        }
+    
+    google_id = google_user.get('id')
+    if not google_id:
+        print("[ERROR] Google user ID is required")
+        return None
+    
+    try:
+        # Try to find existing user by Google ID
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'google_id': f'eq.{google_id}', 'select': '*'},
+            headers=get_headers(),
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            users = response.json()
+            if users:
+                # Update user info (name/picture might change)
+                user = users[0]
+                _update_google_user_info(user['id'], google_user)
+                return user
+        
+        # Create new user
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/users",
+            headers=get_headers(),
+            json={
+                'google_id': google_id,
+                'google_email': google_user.get('email', ''),
+                'google_name': google_user.get('name', ''),
+                'google_picture': google_user.get('picture', ''),
+                'settings': {'auto_scrobble': False, 'interval': 300},
+                'is_active': True,
+                'last_login_at': datetime.utcnow().isoformat()
+            },
+            timeout=10
+        )
+        
+        if response.status_code in (200, 201):
+            users = response.json()
+            print(f"[INFO] Created new user: {google_user.get('email')}")
+            return users[0] if users else None
+        else:
+            print(f"[ERROR] Failed to create user: {response.status_code} {response.text[:200]}")
+            return None
+            
+    except requests.RequestException as e:
+        print(f"[ERROR] get_or_create_user_by_google failed: {e}")
+        return None
+
+
+def _update_google_user_info(user_id: str, google_user: Dict[str, Any]) -> bool:
+    """Update Google user info (name, picture) and last login on login"""
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'id': f'eq.{user_id}'},
+            headers=get_headers(),
+            json={
+                'google_name': google_user.get('name', ''),
+                'google_picture': google_user.get('picture', ''),
+                'last_login_at': datetime.utcnow().isoformat(),
+                'updated_at': datetime.utcnow().isoformat()
+            },
+            timeout=5
+        )
+        return response.status_code in (200, 204)
+    except:
+        return False
+
+
+def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+    """Get user by their database UUID"""
+    if not REST_API_AVAILABLE or not user_id:
+        return None
+    
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'id': f'eq.{user_id}', 'select': '*'},
+            headers=get_headers(),
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            users = response.json()
+            return users[0] if users else None
+        return None
+        
+    except requests.RequestException as e:
+        print(f"[ERROR] get_user_by_id failed: {e}")
+        return None
+
+
+# Legacy function - kept for backwards compatibility
+def get_or_create_user(lastfm_username: str) -> Optional[Dict[str, Any]]:
+    """
+    DEPRECATED: Use get_or_create_user_by_google instead.
+    This is kept for backwards compatibility during migration.
+    """
+    if not REST_API_AVAILABLE:
+        return {'id': 'local', 'lastfm_username': lastfm_username}
     
     try:
         # Try to find existing user
@@ -118,43 +200,49 @@ def get_or_create_user(lastfm_username: str) -> Optional[Dict[str, Any]]:
             if users:
                 return users[0]
         
-        # Create new user
-        response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/users",
-            headers=get_headers(),
-            json={
-                'lastfm_username': lastfm_username,
-                'settings': {'auto_scrobble': False, 'interval': 300}
-            },
-            timeout=10
-        )
-        
-        if response.status_code in (200, 201):
-            users = response.json()
-            return users[0] if users else None
-        else:
-            print(f"[ERROR] Failed to create user: {response.status_code} {response.text[:200]}")
-            return None
+        # Legacy: Don't create new users via lastfm_username anymore
+        # New users must use Google OAuth
+        print(f"[WARN] Legacy get_or_create_user called for {lastfm_username} - use Google OAuth")
+        return None
             
     except requests.RequestException as e:
         print(f"[ERROR] get_or_create_user failed: {e}")
         return None
 
 
-def get_all_active_users() -> list:
-    """Get all users with auto_scrobble enabled"""
+def get_all_active_users(batch_size: int = 100, offset: int = 0) -> list:
+    """
+    Get users with auto_scrobble enabled and is_active=true, with pagination.
+    Optimized for 5000+ users.
+    
+    Args:
+        batch_size: Number of users to fetch per batch (default 100)
+        offset: Starting offset for pagination
+    
+    Returns:
+        List of active user dicts
+    """
     if not REST_API_AVAILABLE:
         return []
     
     try:
+        # Use Range header for proper Supabase pagination
+        headers = get_headers()
+        headers['Range'] = f'{offset}-{offset + batch_size - 1}'
+        
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/users",
-            params={'settings->>auto_scrobble': 'eq.true', 'select': '*'},
-            headers=get_headers(),
-            timeout=10
+            params={
+                'is_active': 'eq.true',
+                'settings->>auto_scrobble': 'eq.true',
+                'select': 'id,google_id,google_email,lastfm_username,lastfm_api_key,lastfm_api_secret,lastfm_session_key,ytmusic_headers,settings',
+                'order': 'last_sync_at.asc.nullsfirst'  # Prioritize users who haven't synced recently
+            },
+            headers=headers,
+            timeout=30
         )
         
-        if response.status_code == 200:
+        if response.status_code == 200 or response.status_code == 206:
             return response.json()
         return []
         
@@ -163,9 +251,64 @@ def get_all_active_users() -> list:
         return []
 
 
-def save_user_credentials(user_id: str, lastfm_config: Dict, ytmusic_headers: str) -> bool:
-    """Save user's Last.fm and YT Music credentials"""
+def get_active_users_count() -> int:
+    """Get total count of active users with auto_scrobble enabled"""
     if not REST_API_AVAILABLE:
+        return 0
+    
+    try:
+        headers = get_headers()
+        headers['Prefer'] = 'count=exact'
+        
+        response = requests.head(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={
+                'is_active': 'eq.true',
+                'settings->>auto_scrobble': 'eq.true'
+            },
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            content_range = response.headers.get('content-range', '')
+            # Format: "0-N/total" or "*/total"
+            if '/' in content_range:
+                return int(content_range.split('/')[-1])
+        return 0
+        
+    except (requests.RequestException, ValueError) as e:
+        print(f"[ERROR] get_active_users_count failed: {e}")
+        return 0
+
+
+def iterate_active_users(batch_size: int = 100):
+    """
+    Generator that yields all active users in batches.
+    Memory-efficient for 5000+ users.
+    
+    Usage:
+        for user in iterate_active_users():
+            process_user(user)
+    """
+    offset = 0
+    while True:
+        batch = get_all_active_users(batch_size=batch_size, offset=offset)
+        if not batch:
+            break
+        
+        for user in batch:
+            yield user
+        
+        if len(batch) < batch_size:
+            break
+        
+        offset += batch_size
+
+
+def update_user_last_sync(user_id: str) -> bool:
+    """Update user's last_sync_at timestamp"""
+    if not REST_API_AVAILABLE or not user_id:
         return False
     
     try:
@@ -173,13 +316,37 @@ def save_user_credentials(user_id: str, lastfm_config: Dict, ytmusic_headers: st
             f"{SUPABASE_URL}/rest/v1/users",
             params={'id': f'eq.{user_id}'},
             headers=get_headers(),
-            json={
-                'lastfm_api_key': lastfm_config.get('api_key', ''),
-                'lastfm_api_secret': lastfm_config.get('api_secret', ''),
-                'lastfm_session_key': lastfm_config.get('session_key', ''),
-                'ytmusic_headers': ytmusic_headers,
-                'updated_at': datetime.utcnow().isoformat()
-            },
+            json={'last_sync_at': datetime.utcnow().isoformat()},
+            timeout=5
+        )
+        return response.status_code in (200, 204)
+    except:
+        return False
+
+
+def save_user_credentials(user_id: str, lastfm_config: Dict, ytmusic_headers: str, lastfm_username: str = None) -> bool:
+    """Save user's Last.fm and YT Music credentials"""
+    if not REST_API_AVAILABLE:
+        return False
+    
+    try:
+        update_data = {
+            'lastfm_api_key': lastfm_config.get('api_key', ''),
+            'lastfm_api_secret': lastfm_config.get('api_secret', ''),
+            'lastfm_session_key': lastfm_config.get('session_key', ''),
+            'ytmusic_headers': ytmusic_headers,
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        
+        # Also save Last.fm username if provided
+        if lastfm_username:
+            update_data['lastfm_username'] = lastfm_username
+        
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'id': f'eq.{user_id}'},
+            headers=get_headers(),
+            json=update_data,
             timeout=10
         )
         
