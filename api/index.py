@@ -1229,10 +1229,10 @@ HTML_TEMPLATE = '''
                         </div>
                     `;
                 } else if (isGuest) {
-                    // Guest mode - show main app
+                    // Guest mode - show main app with sign in option
                     loginScreen.style.display = 'none';
                     mainApp.style.display = 'block';
-                    userArea.innerHTML = `<span class="user-name" style="font-size: 12px;">Guest Mode</span>`;
+                    userArea.innerHTML = `<span class="user-name" style="font-size: 12px;">Guest</span><a href="#" onclick="exitGuestMode()" class="logout-btn" style="font-size: 11px;">Sign In</a>`;
                 } else {
                     // Not logged in - show login screen
                     loginScreen.style.display = 'flex';
@@ -1245,11 +1245,17 @@ HTML_TEMPLATE = '''
             }
         }
         
+        function exitGuestMode() {
+            localStorage.removeItem('guestMode');
+            document.getElementById('login-screen').style.display = 'flex';
+            document.getElementById('main-app').style.display = 'none';
+        }
+        
         function skipLogin() {
             localStorage.setItem('guestMode', 'true');
             document.getElementById('login-screen').style.display = 'none';
             document.getElementById('main-app').style.display = 'block';
-            document.getElementById('user-area').innerHTML = `<span class="user-name" style="font-size: 12px;">Guest Mode</span>`;
+            document.getElementById('user-area').innerHTML = `<span class="user-name" style="font-size: 12px;">Guest</span><a href="#" onclick="exitGuestMode()" class="logout-btn" style="font-size: 11px;">Sign In</a>`;
             loadConfig();
             checkStatus();
         }
