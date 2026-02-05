@@ -1,0 +1,14 @@
+# https://www.robotstxt.org/robotstxt.html
+User-agent: *
+Allow: /
+
+# Sitemap location
+Sitemap: https://ytmusic-scrobbler.vercel.app/sitemap.xml
+
+# Disallow API endpoints that shouldn't be crawled
+Disallow: /api/sync
+Disallow: /api/cron
+Disallow: /api/config
+Disallow: /api/history
+Disallow: /api/auto
+Disallow: /api/auth

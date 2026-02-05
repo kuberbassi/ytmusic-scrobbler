@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, redirect, session
+from flask import Flask, request, jsonify, render_template_string, redirect, session, url_for
 import os
 import json
 import re
@@ -12,158 +12,151 @@ import secrets
 import requests
 import threading
 
+# Import database layer (multi-user support)
+try:
+    from api.database import (
+        UserDataStore, is_multi_user_enabled, get_or_create_user,
+        get_all_active_users, get_file_storage
+    )
+except ImportError:
+    from database import (
+        UserDataStore, is_multi_user_enabled, get_or_create_user,
+        get_all_active_users, get_file_storage
+    )
+
+# Google OAuth Configuration
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
+# Production URI by default - override with GOOGLE_REDIRECT_URI env var for local dev
+GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI', 'https://ytscrobbler.kuberbassi.com/auth/google/callback')
+
 # Global Sync State
-scrobble_lock = threading.Lock()
-file_lock = threading.Lock()  # For safe file access
+scrobble_lock = threading.Lock()  # Lock for individual scrobble calls
+sync_operation_lock = threading.Lock()  # Lock for entire sync operations (prevents overlapping syncs)
 last_sync_time = 0
 sync_logs = []  # List of [timestamp, artist, title, status]
-_session_scrobbled = set()  # Track scrobbles within current session to prevent duplicates
 
-def add_sync_log(artist, title, status="Synced"):
+def add_sync_log(artist, title, status="Synced", user=None):
     global sync_logs
     entry = {
         'time': int(time.time()),
         'artist': artist,
         'title': title,
-        'status': status
+        'status': status,
+        'user': user  # Track which user scrobbled (for multi-user)
     }
     sync_logs.insert(0, entry)
-    sync_logs = sync_logs[:20]  # Keep last 20
+    sync_logs = sync_logs[:50]  # Keep last 50 for multi-user
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
-# Persistent Scrobble Tracking
-SCROBBLED_FILE = os.path.join(os.path.dirname(__file__), "scrobbled.json")
 
-def load_scrobbles():
-    """Thread-safe load of scrobble history"""
-    with file_lock:
-        if os.path.exists(SCROBBLED_FILE):
-            try:
-                with open(SCROBBLED_FILE, "r") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return set(data), {}
-                    return set(data.get('history', [])), data.get('track_meta', {})
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"[WARN] Failed to load scrobbles: {e}")
-                return set(), {}
-        return set(), {}
+# =============================================================================
+# CORE SCROBBLE LOGIC (Shared between single and multi-user)
+# =============================================================================
 
 
-def should_scrobble(track_uid, track_meta_map, current_time, duration, position=0):
+def normalize_string(s: str) -> str:
+    """Normalize a string for consistent comparison"""
+    if not s:
+        return ""
+    # Lowercase, strip whitespace, remove common variations
+    s = s.lower().strip()
+    # Remove featuring variations
+    for feat in [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ']:
+        if feat in s:
+            s = s.split(feat)[0].strip()
+    # Remove special characters but keep alphanumeric and spaces
+    s = ''.join(c for c in s if c.isalnum() or c == ' ')
+    # Collapse multiple spaces
+    s = ' '.join(s.split())
+    return s
+
+
+def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
     """
-    Determine if a track should be scrobbled. Handles both first plays and repeats.
+    Generate multiple UIDs for a track for comprehensive deduplication.
+    Returns list of UIDs to check - if ANY match, track is considered already scrobbled.
+    """
+    uids = []
     
-    Key insight: YT Music doesn't add new history entries for repeats.
-    A track staying at position 0 after its duration = likely a repeat.
+    # Primary: Video ID (most unique)
+    if video_id:
+        uids.append(f"vid:{video_id}")
+    
+    # Secondary: Title + Artist (exact)
+    if title and artist:
+        uids.append(f"{title}_{artist}")
+    
+    # Tertiary: Normalized title + artist (catches slight variations)
+    norm_title = normalize_string(title)
+    norm_artist = normalize_string(artist)
+    if norm_title and norm_artist:
+        uids.append(f"norm:{norm_title}_{norm_artist}")
+    
+    return uids
+
+
+def is_track_scrobbled(track_uids: list, track_meta_map: dict, data_store=None) -> tuple:
+    """
+    Check if a track has been scrobbled using ANY of its UIDs.
+    Returns: (is_scrobbled: bool, matching_uid: str or None)
+    """
+    for uid in track_uids:
+        # Check persistent storage
+        if uid in track_meta_map:
+            return True, uid
+        # Check session storage
+        if data_store and data_store.is_session_scrobbled(uid):
+            return True, uid
+    return False, None
+
+
+def should_scrobble(track_uid, track_meta_map, current_time, duration, position=0, data_store=None):
+    """
+    Determine if a track should be scrobbled.
+    
+    IMPORTANT: YT Music API does NOT provide real-time playback status.
+    We cannot detect:
+    - If music is currently playing or paused
+    - When playback stopped
+    - If a song is actually being replayed vs just sitting in history
+    
+    Therefore, we ONLY scrobble first plays. No repeat detection.
+    This prevents false scrobbles when user stops listening.
     
     Args:
         track_uid: Unique identifier for the track
         track_meta_map: Metadata dict with timestamps
         current_time: Current unix timestamp
-        duration: Track duration in seconds
+        duration: Track duration in seconds (unused, kept for compatibility)
         position: Position in history (0 = most recent)
+        data_store: UserDataStore instance for session tracking
     
     Returns: (should_scrobble: bool, reason: str)
     """
-    global _session_scrobbled
-    
     # Guard 1: Already scrobbled in this sync session (prevents multi-scrobble bug)
-    if track_uid in _session_scrobbled:
+    if data_store and data_store.is_session_scrobbled(track_uid):
         return False, "already_in_session"
     
     # Check if track exists in our history
     meta = track_meta_map.get(track_uid)
     
-    # Case 1: Never scrobbled before - always allow
+    # Case 1: Never scrobbled before - scrobble it
     if meta is None:
         return True, "first_play"
     
     last_scrobble_time = meta.get('timestamp', 0)
     
-    # Case 2: No timestamp recorded - allow (legacy data)
+    # Case 2: No timestamp recorded - allow (legacy data migration)
     if last_scrobble_time == 0:
         return True, "no_timestamp"
     
-    elapsed = current_time - last_scrobble_time
-    
-    # Guard 2: Minimum gap of 45 seconds (anti-spam)
-    min_gap = 45
-    if elapsed < min_gap:
-        return False, f"too_recent ({elapsed}s < {min_gap}s)"
-    
-    # Guard 3: Only top 2 positions can trigger repeat scrobbles
-    # Deeper history items should not be re-scrobbled
-    if position > 1:
-        return False, f"position_too_deep (pos={position})"
-    
-    # Case 3: Repeat detection - enough time for a full replay?
-    # Require full duration + small buffer for sync delays
-    required_time = max(duration, 60)  # At least 60 seconds
-    
-    if elapsed >= required_time:
-        return True, f"repeat (elapsed={elapsed}s >= required={required_time}s)"
-    
-    return False, f"not_enough_time ({elapsed}s < {required_time}s)"
+    # Case 3: Already scrobbled - do NOT scrobble again
+    # We cannot reliably detect repeats without real-time playback data
+    return False, "already_scrobbled"
 
-
-def save_scrobble(track_uid, meta=None):
-    """
-    Thread-safe save of scrobble. Returns updated (history_set, meta_map).
-    Also updates session tracking.
-    """
-    global _session_scrobbled
-    
-    with file_lock:
-        # Load current state
-        if os.path.exists(SCROBBLED_FILE):
-            try:
-                with open(SCROBBLED_FILE, "r") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        history = set(data)
-                        track_meta = {}
-                    else:
-                        history = set(data.get('history', []))
-                        track_meta = data.get('track_meta', {})
-            except:
-                history = set()
-                track_meta = {}
-        else:
-            history = set()
-            track_meta = {}
-        
-        # Update
-        history.add(track_uid)
-        _session_scrobbled.add(track_uid)  # Mark as scrobbled in this session
-        
-        if meta:
-            existing = track_meta.get(track_uid, {})
-            existing.update(meta)
-            existing['last_check'] = meta.get('timestamp', int(time.time()))
-            existing['scrobble_count'] = existing.get('scrobble_count', 0) + 1
-            track_meta[track_uid] = existing
-        
-        # Save
-        try:
-            with open(SCROBBLED_FILE, "w") as f:
-                json.dump({'history': list(history), 'track_meta': track_meta}, f)
-        except IOError as e:
-            print(f"[ERROR] Failed to save scrobble: {e}")
-        
-        return history, track_meta
-
-
-def clear_session_state():
-    """Clear session scrobble tracking. Call at start of each sync."""
-    global _session_scrobbled
-    _session_scrobbled = set()
-
-
-# Initial Load
-scrobbled_tracks, track_meta_map = load_scrobbles()
 
 def get_track_duration(yt_track):
     """Safely extract duration in seconds from YTMusic track object"""
@@ -173,7 +166,7 @@ def get_track_duration(yt_track):
             return int(yt_track['duration_seconds'])
             
         duration_str = yt_track.get('duration')
-        if not duration_str: return 180 # Default 3 mins
+        if not duration_str: return 180  # Default 3 mins
         if ':' in duration_str:
             parts = list(map(int, duration_str.split(':')))
             if len(parts) == 2: return parts[0] * 60 + parts[1]
@@ -182,24 +175,76 @@ def get_track_duration(yt_track):
     except:
         return 180
 
-# Configuration Persistence
+
+# =============================================================================
+# LEGACY COMPATIBILITY WRAPPERS (For backward compatibility with single-user)
+# =============================================================================
+
+def load_scrobbles():
+    """Legacy wrapper - loads from file storage"""
+    return get_file_storage().load_scrobbles()
+
+
+def save_scrobble(track_uid, meta=None):
+    """Legacy wrapper - saves to file storage"""
+    return get_file_storage().save_scrobble(track_uid, meta)
+
+
+# Configuration Persistence (now uses database for multi-user)
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 
-class ConfigManager:
-    @staticmethod
-    def load():
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r") as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
 
+class ConfigManager:
+    """
+    Configuration manager that supports both single-user (file) and multi-user (database).
+    """
+    
     @staticmethod
-    def save(config):
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=4)
+    def load(user_id=None):
+        """Load config - from DB if multi-user enabled, else from file"""
+        if is_multi_user_enabled() and user_id:
+            store = UserDataStore(user_id=user_id)
+            return store.get_config()
+        
+        # Fallback to file
+        return get_file_storage().load_config()
+    
+    @staticmethod
+    def save(config, user_id=None):
+        """Save config - to DB if multi-user enabled, else to file"""
+        if is_multi_user_enabled() and user_id:
+            store = UserDataStore(user_id=user_id)
+            store.save_config(config)
+            return
+        
+        # Fallback to file
+        get_file_storage().save_config(config)
+    
+    @staticmethod
+    def get_user_from_session(session_key, api_key, api_secret):
+        """
+        Get or create user based on Last.fm session. Returns (user_id, username).
+        """
+        if not is_multi_user_enabled():
+            return None, None
+        
+        try:
+            # Get Last.fm username from session
+            network = pylast.LastFMNetwork(
+                api_key=api_key,
+                api_secret=api_secret,
+                session_key=session_key
+            )
+            username = str(network.get_authenticated_user())
+            
+            # Get or create user in database
+            user = get_or_create_user(username)
+            if user:
+                return user.get('id'), username
+        except Exception as e:
+            print(f"[WARN] Failed to get user from session: {e}")
+        
+        return None, None
 
 # YTMusic Scrobbler - Powered by Browser Headers
 
@@ -579,6 +624,41 @@ HTML_TEMPLATE = '''
         }
         @keyframes spin { to { transform: rotate(360deg); } }
         .modal-status { font-size: 13px; color: var(--text-tertiary); margin-top: 16px; }
+        
+        /* Login Screen */
+        .login-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 80vh;
+            text-align: center;
+            padding: 24px;
+        }
+        .login-logo { font-size: 48px; margin-bottom: 24px; }
+        .login-title { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+        .login-subtitle { color: var(--text-secondary); margin-bottom: 32px; max-width: 400px; }
+        .login-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 28px;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: var(--bg-elevated);
+            color: var(--text-primary);
+            transition: all 0.2s;
+        }
+        .login-btn:hover { border-color: var(--border-hover); background: var(--bg-tertiary); }
+        .login-btn svg { width: 20px; height: 20px; }
+        .user-menu { display: flex; align-items: center; gap: 12px; }
+        .user-avatar { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); }
+        .user-name { font-size: 13px; color: var(--text-secondary); }
+        .logout-btn { font-size: 12px; color: var(--text-tertiary); cursor: pointer; text-decoration: none; }
+        .logout-btn:hover { color: var(--text-primary); }
     </style>
 </head>
 <body data-theme="dark">
@@ -590,6 +670,7 @@ HTML_TEMPLATE = '''
             YT Music Scrobbler
         </div>
         <div class="header-actions">
+            <div id="user-area"></div>
             <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme">
                 <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -598,7 +679,24 @@ HTML_TEMPLATE = '''
         </div>
     </header>
 
-    <main class="container">
+    <!-- Login Screen (shown when multi-user and not logged in) -->
+    <div id="login-screen" class="login-screen" style="display: none;">
+        <div class="login-logo">🎵</div>
+        <h1 class="login-title">YT Music Scrobbler</h1>
+        <p class="login-subtitle">Sign in to sync your YouTube Music listening history to Last.fm automatically</p>
+        <a href="/auth/google" class="login-btn">
+            <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+            Sign in with Google
+        </a>
+        <p style="margin-top: 24px; font-size: 13px; color: var(--text-tertiary);">
+            Or continue without login for single-user mode
+        </p>
+        <button onclick="skipLogin()" class="btn btn-secondary" style="margin-top: 12px;">
+            Continue as Guest
+        </button>
+    </div>
+
+    <main id="main-app" class="container">
         <h1>YT Music → Last.fm</h1>
         <p class="subtitle">Scrobble your YouTube Music history automatically</p>
 
@@ -1097,15 +1195,93 @@ HTML_TEMPLATE = '''
             updateYTState();
         }
 
+        // Check login state and show appropriate screen
+        let currentUser = null;
+        async function checkLoginState() {
+            try {
+                const res = await fetch('/api/user');
+                const data = await res.json();
+                
+                const loginScreen = document.getElementById('login-screen');
+                const mainApp = document.getElementById('main-app');
+                const userArea = document.getElementById('user-area');
+                
+                // Check URL for error
+                const urlParams = new URLSearchParams(window.location.search);
+                const errorMsg = urlParams.get('error');
+                if (errorMsg) {
+                    toast(errorMsg, 'error');
+                    window.history.replaceState({}, '', '/');
+                }
+                
+                // Check if guest mode or logged in
+                const isGuest = localStorage.getItem('guestMode') === 'true';
+                
+                if (data.logged_in) {
+                    currentUser = data.user;
+                    loginScreen.style.display = 'none';
+                    mainApp.style.display = 'block';
+                    userArea.innerHTML = `
+                        <div class="user-menu">
+                            <img class="user-avatar" src="${data.user.picture || ''}" alt="">
+                            <span class="user-name">${data.user.name || data.user.email}</span>
+                            <a href="/auth/logout" class="logout-btn">Logout</a>
+                        </div>
+                    `;
+                } else if (isGuest) {
+                    // Guest mode - show main app
+                    loginScreen.style.display = 'none';
+                    mainApp.style.display = 'block';
+                    userArea.innerHTML = `<span class="user-name" style="font-size: 12px;">Guest Mode</span>`;
+                } else {
+                    // Not logged in - show login screen
+                    loginScreen.style.display = 'flex';
+                    mainApp.style.display = 'none';
+                }
+            } catch (e) {
+                // On error, default to guest mode
+                document.getElementById('login-screen').style.display = 'none';
+                document.getElementById('main-app').style.display = 'block';
+            }
+        }
+        
+        function skipLogin() {
+            localStorage.setItem('guestMode', 'true');
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('main-app').style.display = 'block';
+            document.getElementById('user-area').innerHTML = `<span class="user-name" style="font-size: 12px;">Guest Mode</span>`;
+            loadConfig();
+            checkStatus();
+        }
+
         // Clean up legacy URL params
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.get('google_auth')) {
             window.history.replaceState({}, '', '/');
         }
 
-        loadConfig();
-        checkStatus();
-        setInterval(checkStatus, 5000); // Poll status every 5s
+        // Initialize
+        checkLoginState().then(() => {
+            if (document.getElementById('main-app').style.display !== 'none') {
+                loadConfig();
+                checkStatus();
+                loadHistory();
+            }
+        });
+        
+        // Poll status for real-time updates
+        setInterval(() => {
+            if (document.getElementById('main-app').style.display !== 'none') {
+                checkStatus();
+            }
+        }, 5000);
+        
+        // Real-time history refresh every 10 seconds when on history tab
+        setInterval(() => {
+            if (document.getElementById('history').classList.contains('active')) {
+                loadHistory();
+            }
+        }, 10000);
     </script>
 </body>
 </html>
@@ -1254,7 +1430,112 @@ SIMPLE_PAGE = '''
 '''
 
 
-# Removed Google OAuth Routes
+# =============================================================================
+# GOOGLE OAUTH ROUTES (For Multi-User Authentication)
+# =============================================================================
+
+@app.route('/auth/google')
+def google_login():
+    """Initiate Google OAuth flow"""
+    if not GOOGLE_CLIENT_ID:
+        return jsonify({'error': 'Google OAuth not configured'}), 500
+    
+    # Generate state token for CSRF protection
+    state = secrets.token_urlsafe(32)
+    session['oauth_state'] = state
+    
+    # Build authorization URL
+    params = {
+        'client_id': GOOGLE_CLIENT_ID,
+        'redirect_uri': GOOGLE_REDIRECT_URI,
+        'response_type': 'code',
+        'scope': 'openid email profile',
+        'state': state,
+        'access_type': 'offline',
+        'prompt': 'consent'
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    return redirect(auth_url)
+
+
+@app.route('/auth/google/callback')
+def google_callback():
+    """Handle Google OAuth callback"""
+    error = request.args.get('error')
+    if error:
+        return redirect(f'/?error={error}')
+    
+    code = request.args.get('code')
+    state = request.args.get('state')
+    
+    # Verify state token
+    if state != session.get('oauth_state'):
+        return redirect('/?error=invalid_state')
+    
+    try:
+        # Exchange code for tokens
+        token_response = requests.post(
+            'https://oauth2.googleapis.com/token',
+            data={
+                'client_id': GOOGLE_CLIENT_ID,
+                'client_secret': GOOGLE_CLIENT_SECRET,
+                'code': code,
+                'grant_type': 'authorization_code',
+                'redirect_uri': GOOGLE_REDIRECT_URI
+            },
+            timeout=10
+        )
+        
+        if token_response.status_code != 200:
+            return redirect('/?error=token_exchange_failed')
+        
+        tokens = token_response.json()
+        access_token = tokens.get('access_token')
+        
+        # Get user info
+        user_response = requests.get(
+            'https://www.googleapis.com/oauth2/v2/userinfo',
+            headers={'Authorization': f'Bearer {access_token}'},
+            timeout=10
+        )
+        
+        if user_response.status_code != 200:
+            return redirect('/?error=user_info_failed')
+        
+        user_info = user_response.json()
+        
+        # Store user info in session
+        session['google_user'] = {
+            'id': user_info.get('id'),
+            'email': user_info.get('email'),
+            'name': user_info.get('name'),
+            'picture': user_info.get('picture')
+        }
+        session['logged_in'] = True
+        
+        return redirect('/')
+        
+    except Exception as e:
+        print(f"[ERROR] Google OAuth error: {e}")
+        return redirect(f'/?error=oauth_error')
+
+
+@app.route('/auth/logout')
+def logout():
+    """Log out user"""
+    session.clear()
+    return redirect('/')
+
+
+@app.route('/api/user')
+def get_current_user():
+    """Get current logged in user"""
+    if session.get('logged_in'):
+        return jsonify({
+            'logged_in': True,
+            'user': session.get('google_user')
+        })
+    return jsonify({'logged_in': False})
 
 
 @app.route('/api/status', methods=['POST'])
@@ -1263,10 +1544,11 @@ def status():
     
     # Check Last.fm
     network, _ = get_lastfm_network(config)
+    username = None
     if network:
         try:
-            network.get_authenticated_user()
-            lastfm_status = {'connected': True}
+            username = str(network.get_authenticated_user())
+            lastfm_status = {'connected': True, 'username': username}
         except:
             lastfm_status = {'connected': False}
     else:
@@ -1276,30 +1558,27 @@ def status():
     ytmusic, _ = get_ytmusic_client(config)
     if ytmusic:
         try:
-            # 1. Try history first
             ytmusic.get_history()
             ytmusic_status = {'connected': True}
         except Exception as e:
-            import traceback
             print(f"Status check error (History): {e}")
-            traceback.print_exc()
             try:
-                # 2. Key Fallback: Try search if history fails
-                # This helps verify if connection works even if history is empty/buggy
                 ytmusic.search("test", limit=1)
                 ytmusic_status = {'connected': True, 'warning': "History unavailable"}
             except Exception as e2:
-                import traceback
                 print(f"Status check error (Search): {e2}")
-                traceback.print_exc()
                 ytmusic_status = {'connected': False}
     else:
         ytmusic_status = {'connected': False}
     
     global last_sync_time, sync_logs
-    history, meta_map = load_scrobbles()
-    # Get last track from logs if possible
-    last_track_title = sync_logs[0]['title'] if sync_logs else None
+    
+    # Filter logs for current user in multi-user mode
+    user_logs = sync_logs
+    if is_multi_user_enabled() and username:
+        user_logs = [log for log in sync_logs if log.get('user') == username or log.get('user') is None][:20]
+    
+    last_track_title = user_logs[0]['title'] if user_logs else None
     
     return jsonify({
         'lastfm': lastfm_status, 
@@ -1307,7 +1586,8 @@ def status():
         'last_sync': last_sync_time,
         'now': int(time.time()),
         'last_track': last_track_title,
-        'logs': sync_logs
+        'logs': user_logs[:20],
+        'mode': 'multi-user' if is_multi_user_enabled() else 'single-user'
     })
 
 
@@ -1320,21 +1600,33 @@ def history():
         return jsonify({'error': error or 'Not configured'})
     
     try:
+        # Get data store for checking scrobbled status
+        lastfm_config = config.get('lastfm', {})
+        user_id, username = ConfigManager.get_user_from_session(
+            lastfm_config.get('session_key'),
+            lastfm_config.get('api_key'),
+            lastfm_config.get('api_secret')
+        )
+        data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+        scrobbled_tracks, _ = data_store.get_scrobble_history()
+        
         history = ytmusic.get_history()
         
         tracks = []
         for item in history[:20]:
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
-            # Use videoId if available, else fallback to title_artist hash
-            track_uid = item.get('videoId') or f"{title}_{artist}"
+            video_id = item.get('videoId')
+            # Check both videoId and title_artist formats
+            title_artist_uid = f"{title}_{artist}"
+            is_scrobbled = (video_id and video_id in scrobbled_tracks) or (title_artist_uid in scrobbled_tracks)
             
             tracks.append({
                 'title': title,
                 'artist': artist,
                 'album': item.get('album', {}).get('name', '') if item.get('album') else '',
-                'videoId': item.get('videoId') or 'no-id',
-                'scrobbled': track_uid in scrobbled_tracks
+                'videoId': video_id or 'no-id',
+                'scrobbled': is_scrobbled
             })
         
         return jsonify({'tracks': tracks})
@@ -1346,31 +1638,62 @@ def history():
 def scrobble():
     config = request.json or {}
     
-    network, lastfm_error = get_lastfm_network(config)
-    if not network:
-        return jsonify({'success': False, 'error': lastfm_error or 'Last.fm not configured'})
-    
-    ytmusic, ytmusic_error = get_ytmusic_client(config)
-    if not ytmusic:
-        return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
+    # Prevent overlapping sync operations
+    if not sync_operation_lock.acquire(blocking=False):
+        return jsonify({'success': False, 'error': 'Sync already in progress'})
     
     try:
-        # Reset session state and load fresh from disk
-        clear_session_state()
-        global scrobbled_tracks, track_meta_map
-        scrobbled_tracks, track_meta_map = load_scrobbles()
+        network, lastfm_error = get_lastfm_network(config)
+        if not network:
+            return jsonify({'success': False, 'error': lastfm_error or 'Last.fm not configured'})
         
-        # Optional: Sync with Last.fm to avoid duplicates
-        if not getattr(app, '_lastfm_synced', False):
-            try:
-                authenticated_user = network.get_authenticated_user()
-                recent = network.get_user(authenticated_user).get_recent_tracks(limit=50)
-                for r in recent:
-                    r_uid = f"{r.track.title}_{r.track.artist.name}"
-                    scrobbled_tracks.add(r_uid)
-                app._lastfm_synced = True
-            except Exception as e:
-                print(f"[WARN] Last.fm sync check failed: {e}")
+        ytmusic, ytmusic_error = get_ytmusic_client(config)
+        if not ytmusic:
+            return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
+        
+        # Determine user context for multi-user support
+        lastfm_config = config.get('lastfm', {})
+        user_id, username = ConfigManager.get_user_from_session(
+            lastfm_config.get('session_key'),
+            lastfm_config.get('api_key'),
+            lastfm_config.get('api_secret')
+        )
+        
+        # Create data store (uses DB if multi-user, else file)
+        data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+        data_store.clear_session()
+        
+        # Load scrobble history
+        scrobbled_tracks, track_meta_map = data_store.get_scrobble_history()
+        
+        # Sync with Last.fm to avoid duplicates (marks recent Last.fm tracks as already scrobbled)
+        # This runs every time to catch any tracks scrobbled from other sources
+        try:
+            authenticated_user = network.get_authenticated_user()
+            recent = network.get_user(authenticated_user).get_recent_tracks(limit=50)
+            lastfm_synced_count = 0
+            for r in recent:
+                # Generate ALL possible UIDs for this track
+                track_uids = generate_track_uids(r.track.title, r.track.artist.name)
+                
+                # Check if ANY UID already exists
+                already_scrobbled, _ = is_track_scrobbled(track_uids, track_meta_map, data_store)
+                if already_scrobbled:
+                    continue
+                
+                meta = {
+                    'timestamp': int(time.time()) - 3600,  # Mark as 1 hour ago
+                    'track_title': r.track.title,
+                    'artist': r.track.artist.name
+                }
+                # Save ALL UIDs to storage for comprehensive deduplication
+                for uid in track_uids:
+                    scrobbled_tracks, track_meta_map = data_store.save_scrobble(uid, meta)
+                lastfm_synced_count += 1
+            if lastfm_synced_count > 0:
+                print(f"[INFO] Synced {lastfm_synced_count} tracks from Last.fm history")
+        except Exception as e:
+            print(f"[WARN] Last.fm sync check failed: {e}")
 
         history = ytmusic.get_history()
         if not history:
@@ -1379,7 +1702,7 @@ def scrobble():
         scrobbled_count = 0
         current_time = int(time.time())
         
-        # Process history - limit to 20 for manual sync to be safe
+        # Process history - limit to 20 for manual sync
         for i, item in enumerate(history[:20]):
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
@@ -1387,50 +1710,49 @@ def scrobble():
             album = item.get('album', {}).get('name', '') if item.get('album') else ''
             video_id = item.get('videoId')
             
-            # Skip items without proper identifiers
             if not video_id and title == 'Unknown':
                 continue
             
-            track_uid = video_id or f"{title}_{artist}"
-            duration = get_track_duration(item)
+            # Generate ALL possible UIDs for this track
+            track_uids = generate_track_uids(title, artist, video_id)
             
-            # Check if we should scrobble this track
-            can_scrobble, reason = should_scrobble(
-                track_uid, track_meta_map, current_time, duration, position=i
-            )
+            # Check if ANY UID was already scrobbled - bulletproof deduplication
+            already_scrobbled, matching_uid = is_track_scrobbled(track_uids, track_meta_map, data_store)
             
-            if not can_scrobble:
-                print(f"[DEBUG] Skipping '{title}' - {reason}")
+            if already_scrobbled:
+                print(f"[DEBUG] Skipping '{title}' - already_scrobbled (matched: {matching_uid})")
                 continue
             
-            print(f"[DEBUG] Scrobbling '{title}' - {reason}")
+            print(f"[DEBUG] Scrobbling '{title}' - first_play")
 
             try:
                 with scrobble_lock:
-                    timestamp = current_time - (i * 3)  # Slight offset per track
+                    timestamp = current_time - (i * 3)
                     network.scrobble(
                         artist=artist,
                         title=title,
                         timestamp=timestamp,
                         album=album if album else None
                     )
-                    # Update state immediately after successful scrobble
-                    scrobbled_tracks, track_meta_map = save_scrobble(track_uid, {
+                    # Save ALL UIDs to prevent any future duplicates
+                    scrobble_meta = {
                         'timestamp': timestamp,
                         'track_title': title,
                         'artist': artist
-                    })
-                    add_sync_log(artist, title)
+                    }
+                    for uid in track_uids:
+                        scrobbled_tracks, track_meta_map = data_store.save_scrobble(uid, scrobble_meta)
+                    add_sync_log(artist, title, user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
                 print(f"[ERROR] Last.fm API error for '{title}': {e}")
-                add_sync_log(artist, title, status=f"API: {str(e)[:12]}")
+                add_sync_log(artist, title, status=f"API: {str(e)[:12]}", user=username)
             except Exception as e:
                 print(f"[ERROR] Scrobble failed for '{title}': {e}")
-                add_sync_log(artist, title, status=f"Err: {str(e)[:12]}")
+                add_sync_log(artist, title, status=f"Err: {str(e)[:12]}", user=username)
         
         status_msg = f"Scrobbled {scrobbled_count}" if scrobbled_count > 0 else "No new tracks"
-        add_sync_log("System", status_msg, status="Done")
+        add_sync_log("System", status_msg, status="Done", user=username)
         global last_sync_time
         last_sync_time = int(time.time())
         return jsonify({'success': True, 'count': scrobbled_count})
@@ -1439,15 +1761,26 @@ def scrobble():
         traceback.print_exc()
         add_sync_log("System", "Sync failed", status="Error")
         return jsonify({'success': False, 'error': str(e)})
+    finally:
+        sync_operation_lock.release()
 
-# Background Worker
+# Background Worker (for local/single-user mode)
 class BackgroundScrobbler:
+    """
+    Background scrobbler for local/single-user mode.
+    For multi-user production, use the /api/cron endpoint with Vercel Cron.
+    """
     def __init__(self):
         self.thread = None
         self.stop_event = threading.Event()
         
     def run(self):
-        print("[INFO] Background Scrobbler Started")
+        # Don't run background worker in multi-user mode (use cron instead)
+        if is_multi_user_enabled():
+            print("[INFO] Multi-user mode detected. Use /api/cron for background sync.")
+            return
+        
+        print("[INFO] Background Scrobbler Started (Single-User Mode)")
         while not self.stop_event.is_set():
             config = ConfigManager.load()
             auto_enabled = config.get('auto_scrobble') == True
@@ -1455,48 +1788,54 @@ class BackgroundScrobbler:
             
             if auto_enabled:
                 now = time.time()
-                # Responsive check: Has the interval passed? 
                 if now - last_sync_time >= interval:
-                    print(f"[INFO] Background Sync: Starting... (Interval: {interval}s)")
+                    # Skip if manual sync is running
+                    if not sync_operation_lock.acquire(blocking=False):
+                        print(f"[INFO] Background Sync: Skipped (manual sync in progress)")
+                        continue
                     try:
+                        print(f"[INFO] Background Sync: Starting... (Interval: {interval}s)")
                         self._perform_sync(config)
                     except Exception as e:
                         print(f"[ERROR] Background Sync failed: {e}")
+                    finally:
+                        sync_operation_lock.release()
             
-            # Wake up every 5s to check for config changes/interval
             self.stop_event.wait(5)
 
-    def _perform_sync(self, config):
+    def _perform_sync(self, config, user_id=None, username=None):
+        """Perform sync for a single user. Used by both local and cron."""
         global last_sync_time
-        last_sync_time = int(time.time())  # Update immediately to prevent spam
+        last_sync_time = int(time.time())
         
         network, net_err = get_lastfm_network(config)
         ytmusic, yt_err = get_ytmusic_client(config)
         
         if not network:
             print(f"[WARN] Background sync: Last.fm not available - {net_err}")
-            return
+            return 0
         if not ytmusic:
             print(f"[WARN] Background sync: YT Music not available - {yt_err}")
-            return
+            return 0
         
-        # Reset session state for this sync
-        clear_session_state()
-        history_set, meta_map = load_scrobbles()
+        # Use UserDataStore for proper per-user isolation
+        data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+        data_store.clear_session()
+        history_set, meta_map = data_store.get_scrobble_history()
         
         try:
             history = ytmusic.get_history()
         except Exception as e:
             print(f"[ERROR] Background sync: Failed to get history - {e}")
-            return
+            return 0
         
         if not history:
-            return
+            return 0
         
         current_time = int(time.time())
         scrobbled_count = 0
         
-        # Background sync: ONLY check first 3 items (most strict)
+        # Background sync: ONLY check first 3 items
         for i, item in enumerate(history[:3]):
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
@@ -1507,20 +1846,17 @@ class BackgroundScrobbler:
             if not video_id and title == 'Unknown':
                 continue
             
-            track_uid = video_id or f"{title}_{artist}"
-            duration = get_track_duration(item)
+            # Generate ALL possible UIDs for bulletproof deduplication
+            track_uids = generate_track_uids(title, artist, video_id)
             
-            # Use unified should_scrobble logic
-            can_scrobble, reason = should_scrobble(
-                track_uid, meta_map, current_time, duration, position=i
-            )
+            # Check if ANY UID was already scrobbled
+            already_scrobbled, matching_uid = is_track_scrobbled(track_uids, meta_map, data_store)
             
-            if not can_scrobble:
-                print(f"[BG] Skip '{title}' - {reason}")
+            if already_scrobbled:
+                print(f"[BG] Skip '{title}' - already_scrobbled (matched: {matching_uid})")
                 continue
             
-            is_repeat = track_uid in history_set
-            print(f"[BG] {'Repeat' if is_repeat else 'New'}: '{title}' - {reason}")
+            print(f"[BG] New: '{title}' - first_play")
 
             try:
                 with scrobble_lock:
@@ -1530,22 +1866,27 @@ class BackgroundScrobbler:
                         timestamp=current_time,
                         album=album if album else None
                     )
-                    history_set, meta_map = save_scrobble(track_uid, {
+                    # Save ALL UIDs to prevent duplicates
+                    scrobble_meta = {
                         'timestamp': current_time,
                         'track_title': title,
                         'artist': artist
-                    })
-                    add_sync_log(artist, title, status="Loop" if is_repeat else "Auto")
+                    }
+                    for uid in track_uids:
+                        history_set, meta_map = data_store.save_scrobble(uid, scrobble_meta)
+                    add_sync_log(artist, title, status="Auto", user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
                 print(f"[BG] Last.fm API error: {e}")
-                add_sync_log(artist, title, status="API Err")
+                add_sync_log(artist, title, status="API Err", user=username)
             except Exception as e:
                 print(f"[BG] Scrobble error: {e}")
-                add_sync_log(artist, title, status="Error")
+                add_sync_log(artist, title, status="Error", user=username)
         
         if scrobbled_count > 0:
-            print(f"[INFO] Background Sync: {scrobbled_count} tracks scrobbled")
+            print(f"[INFO] Background Sync: {scrobbled_count} tracks scrobbled for {username or 'local'}")
+        
+        return scrobbled_count
 
     def start(self):
         if self.thread is None or not self.thread.is_alive():
@@ -1553,9 +1894,78 @@ class BackgroundScrobbler:
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
 
-# Initialize background worker
+
+# Initialize background worker (only runs in single-user mode)
 bg_scrobbler = BackgroundScrobbler()
 bg_scrobbler.start()
+
+
+# =============================================================================
+# CRON ENDPOINT (For Vercel Cron / Multi-User Background Sync)
+# =============================================================================
+
+@app.route('/api/cron', methods=['GET', 'POST'])
+def cron_sync():
+    """
+    Cron endpoint for background sync. Supports both single and multi-user modes.
+    
+    For Vercel, configure in vercel.json:
+    {
+      "crons": [{
+        "path": "/api/cron",
+        "schedule": "*/5 * * * *"  // Every 5 minutes
+      }]
+    }
+    
+    Security: Verify Vercel cron secret in production.
+    """
+    # Optional: Verify cron secret for security
+    cron_secret = os.environ.get('CRON_SECRET')
+    if cron_secret:
+        auth_header = request.headers.get('Authorization', '')
+        if f'Bearer {cron_secret}' != auth_header:
+            return jsonify({'error': 'Unauthorized'}), 401
+    
+    results = {'users_processed': 0, 'total_scrobbled': 0, 'errors': []}
+    
+    if is_multi_user_enabled():
+        # Multi-user mode: Process all active users
+        active_users = get_all_active_users()
+        print(f"[CRON] Processing {len(active_users)} active users")
+        
+        for user in active_users:
+            try:
+                user_id = user.get('id')
+                username = user.get('lastfm_username')
+                
+                # Build config from user's stored credentials
+                store = UserDataStore(user_id=user_id, lastfm_username=username)
+                config = store.get_config()
+                
+                # Check if auto_scrobble is enabled
+                if not config.get('auto_scrobble', False):
+                    continue
+                
+                count = bg_scrobbler._perform_sync(config, user_id=user_id, username=username)
+                results['users_processed'] += 1
+                results['total_scrobbled'] += count
+                
+            except Exception as e:
+                print(f"[CRON] Error processing user {user.get('lastfm_username')}: {e}")
+                results['errors'].append(str(e))
+    else:
+        # Single-user mode: Process local config
+        config = ConfigManager.load()
+        if config.get('auto_scrobble', False):
+            count = bg_scrobbler._perform_sync(config)
+            results['users_processed'] = 1
+            results['total_scrobbled'] = count
+    
+    return jsonify({
+        'success': True,
+        'mode': 'multi-user' if is_multi_user_enabled() else 'single-user',
+        **results
+    })
 
 @app.route('/api/config', methods=['GET', 'POST'])
 def handle_config():

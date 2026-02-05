@@ -8,6 +8,7 @@ Automatically scrobble your YouTube Music listening history to Last.fm. This scr
 - **Smart Repeat Detection:** Uses track duration to correctly scrobble songs played on repeat (overcoming YouTube Music's history limitations).
 - **Auto-Refreshing UI:** The dashboard updates your history in real-time as background scrobbles complete.
 - **Persistent Tracking:** Never scrobbles the same track twice, even after a server restart.
+- **Multi-User Support:** Deploy once, support unlimited users (with Supabase).
 - **No Complex API Setup:** No need for Google Cloud Console OAuth setup.
 - **Light/Dark Mode:** Dynamic, premium interface.
 
@@ -24,11 +25,11 @@ cd ytmusic-scrobbler
 pip install -r requirements.txt
 ```
 
-### 3. Run
+### 3. Run Locally
 ```bash
 python local_run.py
 ```
-Open `http://localhost:5000` in your browser.
+Open `http://localhost:3000` in your browser.
 
 ### 4. Setup
 1.  **Last.fm:** Enter your API Key/Secret and click "Authorize".
@@ -37,6 +38,39 @@ Open `http://localhost:5000` in your browser.
 
 ## 📱 Mobile Support
 This scrobbler reads your **Global YouTube Watch History**. As long as your phone is logged into the same YouTube account and "Watch History" is enabled, your mobile listening will be scrobbled automatically!
+
+---
+
+## 🌐 Multi-User Deployment (Production)
+
+For deploying a public instance that supports multiple users:
+
+### 1. Set Up Supabase (Free)
+1. Create a project at [supabase.com](https://supabase.com)
+2. Go to SQL Editor and run the contents of `schema.sql`
+3. Get your API URL and anon key from Settings > API
+
+### 2. Deploy to Vercel
+1. Fork/clone this repo
+2. Connect to Vercel
+3. Add environment variables:
+   - `SUPABASE_URL` - Your Supabase project URL
+   - `SUPABASE_KEY` - Your Supabase anon/public key
+   - `CRON_SECRET` (optional) - Secret for cron endpoint protection
+
+### 3. How Multi-User Works
+- Each user is identified by their Last.fm username
+- Credentials and scrobble history stored per-user in Supabase
+- Background sync runs via Vercel Cron (every 5 minutes)
+- Users can enable/disable auto-scrobble independently
+
+### Architecture
+| Mode | Storage | Background Sync | Users |
+|------|---------|-----------------|-------|
+| Single-user (local) | JSON files | Threading | 1 |
+| Multi-user (Vercel) | Supabase | Vercel Cron | Unlimited |
+
+---
 
 ## 📄 License
 MIT License.

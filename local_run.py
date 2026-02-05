@@ -14,4 +14,5 @@ if __name__ == '__main__':
     print("=" * 40)
     print("Open http://localhost:3000 in your browser")
     print("=" * 40)
-    app.run(host='0.0.0.0', port=3000, debug=True)
+    # use_reloader=False prevents duplicate background threads in debug mode
+    app.run(host='0.0.0.0', port=3000, debug=True, use_reloader=False)
