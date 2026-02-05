@@ -41,18 +41,20 @@ def load_scrobbles():
                 data = json.load(f)
                 # Convert back to set for track_id checks, handle legacy lists
                 if isinstance(data, list): return set(data), {}
-                return set(data.get('history', [])), data.get('last_meta', {})
+                return set(data.get('history', [])), data.get('track_meta', {})
         except:
             return set(), {}
     return set(), {}
 
 def save_scrobble(track_uid, meta=None):
-    history, last_meta = load_scrobbles()
+    history, track_meta = load_scrobbles()
     history.add(track_uid)
-    if meta: last_meta.update(meta)
+    if meta:
+        # meta should contain 'timestamp' and 'track_title'
+        track_meta[track_uid] = meta
     
     with open(SCROBBLED_FILE, "w") as f:
-        json.dump({'history': list(history), 'last_meta': last_meta}, f)
+        json.dump({'history': list(history), 'track_meta': track_meta}, f)
 
 scrobbled_tracks = load_scrobbles()
 
@@ -717,7 +719,7 @@ HTML_TEMPLATE = '''
                         return `<div class="log-entry ${statusClass}">
                             <span class="time">[${time}]</span> 
                             <b>${entry.artist}</b> - ${entry.title} 
-                            <span style="font-size:10px;color:var(--text-tertiary);float:right;">${entry.status}</span>
+                            &nbsp;<span style="font-size:10px;color:var(--text-tertiary);float:right;">${entry.status}</span>
                         </div>`;
                     }).join('');
                 }
@@ -1188,13 +1190,16 @@ def status():
         ytmusic_status = {'connected': False}
     
     global last_sync_time, sync_logs
-    history, meta = load_scrobbles()
+    history, meta_map = load_scrobbles()
+    # Get last track from logs if possible
+    last_track_title = sync_logs[0]['title'] if sync_logs else None
+    
     return jsonify({
         'lastfm': lastfm_status, 
         'ytmusic': ytmusic_status,
         'last_sync': last_sync_time,
         'now': int(time.time()),
-        'last_track': meta.get('track_title'),
+        'last_track': last_track_title,
         'logs': sync_logs
     })
 
@@ -1245,52 +1250,49 @@ def scrobble():
     try:
         # Load fresh from disk
         global scrobbled_tracks
-        scrobbled_tracks, last_meta = load_scrobbles()
+        scrobbled_tracks, track_meta_map = load_scrobbles()
         
-        # Optional: Sync with Last.fm if scrobbled_tracks is small or on demand
-        # To keep it "fast and smooth", we only do this if it hasn't been done this session
+        # Optional: Sync with Last.fm
         if not getattr(app, '_lastfm_synced', False):
             try:
-                recent = network.get_user(network.get_authenticated_user()).get_recent_tracks(limit=50)
+                authenticated_user = network.get_authenticated_user()
+                recent = network.get_user(authenticated_user).get_recent_tracks(limit=50)
                 for r in recent:
-                    # Create UID from Last.fm data
                     r_uid = f"{r.track.title}_{r.track.artist.name}"
                     scrobbled_tracks.add(r_uid)
                 app._lastfm_synced = True
-            except:
-                pass
+            except: pass
 
         history = ytmusic.get_history()
-        
         scrobbled_count = 0
         current_time = int(time.time())
         
-        # Safe limit: 50 items
         for i, item in enumerate(history[:50]):
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
             album = item.get('album', {}).get('name', '') if item.get('album') else ''
             track_uid = item.get('videoId') or f"{title}_{artist}"
             
+            # SMART REPEAT DETECTION
             if track_uid in scrobbled_tracks:
-                # SMART REPEAT DETECTION
-                # If it's the SAME track as last scrobble, and enough time has passed
-                last_time = last_meta.get('timestamp', 0)
+                m = track_meta_map.get(track_uid, {})
+                last_time = m.get('timestamp', 0)
                 duration = get_track_duration(item)
-                if last_meta.get('uid') == track_uid and (current_time - last_time) > duration:
-                    # It's a repeat! Allow to fall through and scrobble again
-                    pass
+                
+                # If we scrobbled this track before, allow a repeat ONLY if enough time passed
+                if (current_time - last_time) > (duration * 0.85): # 85% through or full duration
+                    pass # Allow
                 else:
-                    continue
+                    continue # Skip repeat
             
-            # Guard: Only scrobble the first few items if they are "new" to us
-            # to avoid scrobbling very old history on first run.
-            if i > 25:
+            # Batch Guard: Don't scrobble too deep into history if we already have it
+            # This prevents accidental scrobbling of old items
+            if i > 5 and track_uid in scrobbled_tracks:
                 continue
-            
+
             try:
                 with scrobble_lock:
-                    timestamp = current_time - (i * 180)
+                    timestamp = current_time - (i * 5) # Smaller offset for manual scrobble
                     network.scrobble(
                         artist=artist,
                         title=title,
@@ -1298,15 +1300,13 @@ def scrobble():
                         album=album if album else None
                     )
                     save_scrobble(track_uid, {
-                        'uid': track_uid,
                         'timestamp': timestamp,
                         'track_title': title
                     })
                     add_sync_log(artist, title)
                     scrobbled_count += 1
             except Exception as e:
-                print(f"Error scrobbling {title}: {e}")
-                add_sync_log(artist, title, status=f"Error: {str(e)[:20]}")
+                add_sync_log(artist, title, status=f"Err: {str(e)[:15]}")
         
         return jsonify({'success': True, 'count': scrobbled_count})
     except Exception as e:
@@ -1341,54 +1341,53 @@ class BackgroundScrobbler:
     def _perform_sync(self, config):
         network, _ = get_lastfm_network(config)
         ytmusic, _ = get_ytmusic_client(config)
-        
-        if not network or not ytmusic:
-            return
+        if not network or not ytmusic: return
             
-        history_set, last_meta = load_scrobbles()
-        
+        history_set, track_meta_map = load_scrobbles()
         history = ytmusic.get_history()
         current_time = int(time.time())
         scrobbled_count = 0
         
-        for i, item in enumerate(history[:50]):
+        # Background sync should be VERY STRICT. Only check the first few items.
+        for i, item in enumerate(history[:10]):
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
             album = item.get('album', {}).get('name', '') if item.get('album') else ''
             track_uid = item.get('videoId') or f"{title}_{artist}"
             
+            # REPEAT DETECTION (v3)
             if track_uid in history_set:
-                # SMART REPEAT DETECTION
-                last_time = last_meta.get('timestamp', 0)
+                m = track_meta_map.get(track_uid, {})
+                last_time = m.get('timestamp', 0)
                 duration = get_track_duration(item)
-                if last_meta.get('uid') == track_uid and (current_time - last_time) > duration:
-                    pass
+                
+                # Logic: If current time - last scrobble time > song duration, it's a replay!
+                # We use 80% of duration to be safe with sync timing.
+                if last_time > 0 and (current_time - last_time) > (duration * 0.8):
+                    pass # It's a repeat, proceed to scrobble
                 else:
-                    continue
+                    continue # Skip
             
-            # Guard: Only sync extremely recent items in background (top 15)
-            if i > 15:
+            # Guard: If not the top item, and we already scrobbled it, IGNORE.
+            # This prevents scrobbling random old history.
+            if i > 0 and track_uid in history_set:
                 continue
-            
+
             try:
                 with scrobble_lock:
-                    timestamp = current_time - (i * 180)
                     network.scrobble(
-                        artist=artist,
-                        title=title,
-                        timestamp=timestamp,
+                        artist=artist, title=title,
+                        timestamp=current_time,
                         album=album if album else None
                     )
                     save_scrobble(track_uid, {
-                        'uid': track_uid,
-                        'timestamp': timestamp,
+                        'timestamp': current_time,
                         'track_title': title
                     })
-                    add_sync_log(artist, title)
+                    add_sync_log(artist, title, status="Loop" if track_uid in history_set else "Synced")
                     scrobbled_count += 1
             except Exception as e:
-                print(f"Background scrobble error: {e}")
-                add_sync_log(artist, title, status="Error")
+                print(f"Bkg sync err: {e}")
         
         if scrobbled_count > 0:
             global last_sync_time
