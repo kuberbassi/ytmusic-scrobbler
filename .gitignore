@@ -5,6 +5,10 @@ oauth.json
 browser.json
 headers_auth.json
 
+# User data - NEVER commit these!
+api/config.json
+api/scrobbled.json
+
 # Python
 __pycache__/
 *.py[cod]
