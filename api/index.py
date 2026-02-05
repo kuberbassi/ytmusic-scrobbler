@@ -508,6 +508,7 @@ HTML_TEMPLATE = '''
                 </div>
                 <div id="sync-info" class="sync-info">Waiting for sync...</div>
             </div>
+        </div>
 
             <div class="card">
                 <div class="card-header"><span class="card-title">Auto Scrobble</span></div>
@@ -965,6 +966,7 @@ HTML_TEMPLATE = '''
 
         loadConfig();
         checkStatus();
+        setInterval(checkStatus, 5000); // Poll status every 5s
     </script>
 </body>
 </html>
