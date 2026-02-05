@@ -4,12 +4,15 @@
 -- Optimized for 5000+ users with Google OAuth
 -- ============================================================================
 
--- Drop existing policies if they exist (for clean re-runs)
-DROP POLICY IF EXISTS "Service role full access to users" ON users;
-DROP POLICY IF EXISTS "Service role full access to scrobbles" ON scrobbles;
+-- ============================================================================
+-- CLEAN SLATE: Drop existing tables (ONLY if no data to preserve)
+-- ============================================================================
+DROP VIEW IF EXISTS active_users_stats;
+DROP TABLE IF EXISTS scrobbles CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
 
 -- Users table - Google OAuth as primary identity
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     
     -- Google OAuth (primary identity)
@@ -41,7 +44,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- Scrobbles table - stores per-user scrobble history
-CREATE TABLE IF NOT EXISTS scrobbles (
+CREATE TABLE scrobbles (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     
