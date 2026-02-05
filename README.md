@@ -5,6 +5,8 @@ Automatically scrobble your YouTube Music listening history to Last.fm. This scr
 ### 🌟 Features
 - **Header-Based Sync:** Connects using industry-standard browser headers for maximum reliability.
 - **Background Sync:** Once enabled, the server scrobbles in the background even if the browser tab is closed.
+- **Smart Repeat Detection:** Uses track duration to correctly scrobble songs played on repeat (overcoming YouTube Music's history limitations).
+- **Auto-Refreshing UI:** The dashboard updates your history in real-time as background scrobbles complete.
 - **Persistent Tracking:** Never scrobbles the same track twice, even after a server restart.
 - **No Complex API Setup:** No need for Google Cloud Console OAuth setup.
 - **Light/Dark Mode:** Dynamic, premium interface.
