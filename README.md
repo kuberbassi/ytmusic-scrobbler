@@ -1,76 +1,40 @@
-# YT Music Scrobbler
+# YT Music Scrobbler 🎵
 
-**YouTube Music → Last.fm**
+Automatically scrobble your YouTube Music listening history to Last.fm. This scrobbler works for **all devices** (Phone, PC, TV, Nest) by reading your central YouTube Watch History.
 
-```
-┌────────────────┐      ┌────────────────┐
-│ YouTube Music  │ ───► │    Last.fm     │
-└────────────────┘      └────────────────┘
-```
+### 🌟 Features
+- **Header-Based Sync:** Connects using industry-standard browser headers for maximum reliability.
+- **Background Sync:** Once enabled, the server scrobbles in the background even if the browser tab is closed.
+- **Persistent Tracking:** Never scrobbles the same track twice, even after a server restart.
+- **No Complex API Setup:** No need for Google Cloud Console OAuth setup.
+- **Light/Dark Mode:** Dynamic, premium interface.
 
----
+## 🚀 Getting Started
 
-## What it does
+### 1. Requirements
+- Python 3.8+
+- Last.fm API Key (Get it from [last.fm/api](https://www.last.fm/api/account/create))
 
-Syncs your YouTube Music listening history to Last.fm automatically.
-
----
-
-## Features
-
-- ✓ Sign in with Google
-- ✓ Auto scrobble (1-15 min)
-- ✓ Dark/Light mode
-- ✓ Deploy to Vercel
-
----
-
-## Deploy
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/kuberbassi/ytmusic-scrobbler&env=GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,GOOGLE_REDIRECT_URI)
-
-**Set these in Vercel:**
-
-| Variable | Value |
-|----------|-------|
-| `GOOGLE_CLIENT_ID` | from Google Cloud |
-| `GOOGLE_CLIENT_SECRET` | from Google Cloud |
-| `GOOGLE_REDIRECT_URI` | `https://your-app.vercel.app/api/google-callback` |
-
----
-
-## Setup
-
-### Last.fm
-
-1. Go to [last.fm/api/account/create](https://www.last.fm/api/account/create)
-2. Create API account
-3. Copy API Key & Secret
-
-### Google Cloud
-
-1. Go to [console.cloud.google.com](https://console.cloud.google.com)
-2. Create project
-3. Enable **YouTube Data API v3**
-4. Create **OAuth 2.0 Client** (Web application)
-5. Add redirect URI: `http://localhost:3000/api/google-callback`
-
----
-
-## Local Dev
-
+### 2. Installation
 ```bash
 git clone https://github.com/kuberbassi/ytmusic-scrobbler.git
 cd ytmusic-scrobbler
 pip install -r requirements.txt
-cp .env.example .env  # add your keys
-python local_run.py
 ```
 
-Open http://localhost:3000
+### 3. Run
+```bash
+python local_run.py
+```
+Open `http://localhost:5000` in your browser.
 
----
+### 4. Setup
+1.  **Last.fm:** Enter your API Key/Secret and click "Authorize".
+2.  **YT Music:** Paste your browser headers from the Network tab (see [instructions](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html)).
+3.  **Go!** Enable "Auto Scrobble" and close the tab. The scrobbler will keep working in the background.
 
-## License
+## 📱 Mobile Support
+This scrobbler reads your **Global YouTube Watch History**. As long as your phone is logged into the same YouTube account and "Watch History" is enabled, your mobile listening will be scrobbled automatically!
 
-MIT © [Kuber Bassi](https://kuberbassi.com)
+## 📄 License
+MIT License.

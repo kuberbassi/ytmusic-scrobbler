@@ -1,29 +1,60 @@
 from flask import Flask, request, jsonify, render_template_string, redirect, session
 import os
 import json
+import re
 import hashlib
 import time
 import urllib.parse
 from datetime import datetime
 import pylast
-from ytmusicapi import YTMusic, OAuthCredentials
+from ytmusicapi import YTMusic
 import secrets
 import requests
+import threading
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
-# Google OAuth Config - Set these in environment variables
-GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
-GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '')
-GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI', 'http://localhost:3000/api/google-callback')
+# Persistent Scrobble Tracking
+SCROBBLED_FILE = os.path.join(os.path.dirname(__file__), "scrobbled.json")
 
-# YouTube Music OAuth scopes - full access for history
-GOOGLE_SCOPES = [
-    'https://www.googleapis.com/auth/youtube',
-    'https://www.googleapis.com/auth/youtube.readonly',
-    'https://www.googleapis.com/auth/youtubepartner'
-]
+def load_scrobbles():
+    if os.path.exists(SCROBBLED_FILE):
+        try:
+            with open(SCROBBLED_FILE, "r") as f:
+                return set(json.load(f))
+        except:
+            return set()
+    return set()
+
+def save_scrobble(track_uid):
+    current = load_scrobbles()
+    current.add(track_uid)
+    with open(SCROBBLED_FILE, "w") as f:
+        json.dump(list(current), f)
+
+scrobbled_tracks = load_scrobbles()
+
+# Configuration Persistence
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+
+class ConfigManager:
+    @staticmethod
+    def load():
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    @staticmethod
+    def save(config):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=4)
+
+# YTMusic Scrobbler - Powered by Browser Headers
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -39,6 +70,8 @@ HTML_TEMPLATE = '''
     <meta property="og:title" content="YT Music Scrobbler">
     <meta property="og:description" content="Sync YouTube Music to Last.fm automatically">
     <meta property="og:type" content="website">
+    <meta property="og:url" content="https://ytscrobbler.kuberbassi.com">
+    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%23000' rx='20' width='100' height='100'/><polygon fill='%23fff' points='35,25 35,75 75,50'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
@@ -331,6 +364,66 @@ HTML_TEMPLATE = '''
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.2s ease;
+        }
+        .modal-overlay.show { opacity: 1; visibility: visible; }
+        .modal {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            padding: 32px;
+            max-width: 400px;
+            width: 90%;
+            text-align: center;
+            transform: scale(0.95);
+            transition: transform 0.2s ease;
+        }
+        .modal-overlay.show .modal { transform: scale(1); }
+        .modal-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+        .modal-text { font-size: 14px; color: var(--text-secondary); margin-bottom: 24px; }
+        .device-code {
+            font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+            font-size: 32px;
+            font-weight: 600;
+            letter-spacing: 4px;
+            padding: 16px 24px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            margin-bottom: 16px;
+            user-select: all;
+        }
+        .device-link {
+            font-size: 14px;
+            color: var(--blue);
+            margin-bottom: 24px;
+            display: block;
+        }
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--blue);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .modal-status { font-size: 13px; color: var(--text-tertiary); margin-top: 16px; }
     </style>
 </head>
 <body data-theme="dark">
@@ -455,14 +548,18 @@ HTML_TEMPLATE = '''
             <div class="card">
                 <div class="card-header"><span class="card-title">YouTube Music</span></div>
                 <div class="card-body">
-                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">Connect your Google account to access your YouTube Music listening history.</p>
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">Connect your account by pasting your browser headers. This allows the scrobbler to see what you listen to on **any device** (Phone, PC, TV) via your Watch History.</p>
                     
-                    <button class="btn btn-google" onclick="signInWithGoogle()" id="google-btn">
-                        <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-                        <span id="google-btn-text">Sign in with Google</span>
-                    </button>
+                    <div id="method-headers">
+                        <div class="form-group">
+                            <label class="form-label">Browser Headers</label>
+                            <textarea class="form-input" id="yt-headers" placeholder="Paste headers here..." rows="4" style="font-family:monospace;font-size:11px;"></textarea>
+                            <p class="form-hint">Copy from Network tab. <a href="https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html" target="_blank">Instructions</a></p>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveYTHeaders()">Connect with Headers</button>
+                    </div>
                     
-                    <button class="btn btn-secondary" onclick="disconnectGoogle()" id="disconnect-btn" style="display:none;margin-top:8px;">Disconnect</button>
+                    <button class="btn btn-secondary" onclick="disconnectYT()" id="disconnect-btn" style="display:none;margin-top:8px;">Disconnect</button>
                     
                     <p class="form-hint" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:6px;">
                         Make sure YouTube watch history is enabled. <a href="https://myactivity.google.com/activitycontrols" target="_blank">Check settings</a>
@@ -488,20 +585,28 @@ HTML_TEMPLATE = '''
 
     <footer class="footer">
         © <span id="year"></span> <a href="https://kuberbassi.com" target="_blank">Kuber Bassi</a>
+        <span style="margin:0 8px;">·</span>
+        <a href="/terms">Terms</a>
+        <span style="margin:0 8px;">·</span>
+        <a href="/privacy">Privacy</a>
     </footer>
+    <script src="/_vercel/insights/script.js" defer></script>
 
     <script>
         document.getElementById('year').textContent = new Date().getFullYear();
 
-        // Toast
+        // Toast notification system
         function toast(msg, type = 'success') {
-            const c = document.getElementById('toasts');
-            const t = document.createElement('div');
-            t.className = `toast ${type}`;
-            t.innerHTML = `<span class="toast-dot"></span>${msg}`;
-            c.appendChild(t);
-            requestAnimationFrame(() => t.classList.add('show'));
-            setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 200); }, 3000);
+            const container = document.getElementById('toasts');
+            const toastEl = document.createElement('div');
+            toastEl.className = `toast ${type}`;
+            toastEl.innerHTML = `<span class="toast-dot"></span>${msg}`;
+            container.appendChild(toastEl);
+            requestAnimationFrame(() => toastEl.classList.add('show'));
+            setTimeout(() => { 
+                toastEl.classList.remove('show'); 
+                setTimeout(() => toastEl.remove(), 200); 
+            }, 3000);
         }
 
         // Theme
@@ -531,8 +636,7 @@ HTML_TEMPLATE = '''
         function getConfig() {
             return {
                 lastfm: JSON.parse(localStorage.getItem('lastfm') || '{}'),
-                ytmusic: JSON.parse(localStorage.getItem('ytmusic') || '{}'),
-                google_token: localStorage.getItem('google_token')
+                ytmusic: JSON.parse(localStorage.getItem('ytmusic') || '{}')
             };
         }
 
@@ -564,7 +668,7 @@ HTML_TEMPLATE = '''
         }
 
         // Save Last.fm
-        function saveLastfm() {
+        async function saveLastfm() {
             const config = {
                 api_key: document.getElementById('lastfm-key').value.trim(),
                 api_secret: document.getElementById('lastfm-secret').value.trim(),
@@ -572,34 +676,63 @@ HTML_TEMPLATE = '''
             };
             if (!config.api_key || !config.api_secret) return toast('Enter API key and secret', 'error');
             localStorage.setItem('lastfm', JSON.stringify(config));
+            
+            // Sync with Server
+            await saveConfigToServer();
+            
             toast('Last.fm saved');
             log('Last.fm saved');
             checkStatus();
         }
 
-        // Disconnect Google
-        function disconnectGoogle() {
-            localStorage.removeItem('google_token');
-            localStorage.removeItem('ytmusic');
-            document.getElementById('google-btn-text').textContent = 'Sign in with Google';
-            document.getElementById('disconnect-btn').style.display = 'none';
-            toast('Disconnected', 'info');
-            log('Google disconnected');
-            checkStatus();
-        }
         
-        // Update Google button state
-        function updateGoogleButton() {
-            const token = localStorage.getItem('google_token');
-            if (token) {
-                document.getElementById('google-btn-text').textContent = 'Connected';
-                document.getElementById('disconnect-btn').style.display = 'inline-flex';
-            }
+        // Disconnect YouTube Music
+        async function disconnectYT() {
+            localStorage.removeItem('yt_headers');
+            localStorage.removeItem('ytmusic');
+            
+            // Sync with Server
+            await saveConfigToServer();
+            
+            toast('Disconnected from YouTube', 'info');
+            log('Disconnected');
+            checkStatus();
+            updateYTState();
         }
 
-        // Google Sign In
-        function signInWithGoogle() {
-            window.location.href = '/api/google-auth';
+        // Save Browser Headers
+        async function saveYTHeaders() {
+            const headers = document.getElementById('yt-headers').value.trim();
+            if (!headers) return toast('Paste headers first', 'error');
+            
+            localStorage.setItem('yt_headers', headers);
+            localStorage.setItem('ytmusic', JSON.stringify({headers: headers}));
+            
+            // Sync with Server
+            await saveConfigToServer();
+            
+            toast('Headers connected!');
+            log('YouTube Music connected');
+            
+            // Instant State Update
+            updateYTState();
+            checkStatus();
+            setTimeout(loadHistory, 300); // Quick refresh after status
+        }
+
+        // Update YouTube UI State
+        function updateYTState() {
+            const headers = localStorage.getItem('yt_headers');
+            const disconnectBtn = document.getElementById('disconnect-btn');
+            const headerSection = document.getElementById('method-headers');
+            
+            if (headers) {
+                disconnectBtn.style.display = 'inline-flex';
+                headerSection.style.display = 'none';
+            } else {
+                disconnectBtn.style.display = 'none';
+                headerSection.style.display = 'block';
+            }
         }
 
         // Last.fm Auth
@@ -643,6 +776,7 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     toast(`Scrobbled ${data.count} tracks`);
                     log(`Scrobbled ${data.count}`);
+                    loadHistory(); // Auto-refresh history to show newly scrobbled tracks
                 } else {
                     toast(data.error || 'Failed', 'error');
                     log('Error: ' + (data.error || 'Failed'));
@@ -675,58 +809,106 @@ HTML_TEMPLATE = '''
             } catch { list.innerHTML = '<div class="empty">Error</div>'; }
         }
 
-        // Auto scrobble
-        let autoInterval = null;
-        function toggleAuto() {
+        // Auto scrobble (Now purely UI toggle for server-side worker)
+        async function toggleAuto() {
             const toggle = document.getElementById('auto-toggle');
-            if (autoInterval) {
-                clearInterval(autoInterval);
-                autoInterval = null;
-                toggle.classList.remove('active');
-                log('Auto off');
-                toast('Auto scrobble off', 'info');
-            } else {
-                const ms = parseInt(document.getElementById('interval-select').value) * 1000;
-                autoInterval = setInterval(scrobbleNow, ms);
+            const isEnabled = !toggle.classList.contains('active');
+            
+            if (isEnabled) {
                 toggle.classList.add('active');
-                log('Auto on');
-                toast('Auto scrobble on');
-                scrobbleNow();
+                localStorage.setItem('autoScrobble', 'true');
+                log('Auto Sync Server: ON');
+                toast('Server Auto Scrobble ON');
+            } else {
+                toggle.classList.remove('active');
+                localStorage.setItem('autoScrobble', 'false');
+                log('Auto Sync Server: OFF');
+                toast('Server Auto Scrobble OFF', 'info');
             }
+            
+            await saveConfigToServer();
         }
 
-        function updateInterval() {
+        async function updateInterval() {
             const sec = parseInt(document.getElementById('interval-select').value);
             localStorage.setItem('interval', sec);
-            if (autoInterval) {
-                clearInterval(autoInterval);
-                autoInterval = setInterval(scrobbleNow, sec * 1000);
-                toast(`Interval: ${sec/60} min`, 'info');
-            }
+            toast(`Interval: ${sec/60} min`, 'info');
+            await saveConfigToServer();
+        }
+
+        // Server Config Sync
+        async function saveConfigToServer() {
+            const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
+            const yt_headers = localStorage.getItem('yt_headers');
+            const auto_scrobble = localStorage.getItem('autoScrobble') === 'true';
+            const interval = parseInt(document.getElementById('interval-select').value);
+            
+            const config = {
+                lastfm: lastfm,
+                ytmusic: { headers: yt_headers },
+                auto_scrobble: auto_scrobble,
+                interval: interval
+            };
+            
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+            } catch (e) { console.error("Sync to server failed", e); }
         }
 
         // Load config
-        function loadConfig() {
-            const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
-            const interval = localStorage.getItem('interval');
+        async function loadConfig() {
+            // Priority 1: Load from Server
+            try {
+                const res = await fetch('/api/config');
+                const config = await res.json();
+                
+                if (config.lastfm) {
+                    localStorage.setItem('lastfm', JSON.stringify(config.lastfm));
+                    document.getElementById('lastfm-key').value = config.lastfm.api_key || '';
+                    document.getElementById('lastfm-secret').value = config.lastfm.api_secret || '';
+                    document.getElementById('lastfm-session').value = config.lastfm.session_key || '';
+                }
+                
+                if (config.ytmusic?.headers) {
+                    localStorage.setItem('yt_headers', config.ytmusic.headers);
+                    document.getElementById('yt-headers').value = config.ytmusic.headers;
+                }
+                
+                if (config.interval) {
+                    localStorage.setItem('interval', config.interval);
+                    document.getElementById('interval-select').value = config.interval;
+                }
+                
+                if (config.auto_scrobble !== undefined) {
+                    localStorage.setItem('autoScrobble', config.auto_scrobble ? 'true' : 'false');
+                    document.getElementById('auto-toggle').classList.toggle('active', config.auto_scrobble);
+                }
+            } catch (e) {
+                console.error("Failed to load server config, falling back to local", e);
+                // Fallback to local if server fails
+                const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
+                const interval = localStorage.getItem('interval');
+                const yt_headers = localStorage.getItem('yt_headers');
+                const autoEnabled = localStorage.getItem('autoScrobble') === 'true';
+                
+                if (lastfm.api_key) document.getElementById('lastfm-key').value = lastfm.api_key;
+                if (lastfm.api_secret) document.getElementById('lastfm-secret').value = lastfm.api_secret;
+                if (lastfm.session_key) document.getElementById('lastfm-session').value = lastfm.session_key;
+                if (interval) document.getElementById('interval-select').value = interval;
+                if (yt_headers) document.getElementById('yt-headers').value = yt_headers;
+                if (autoEnabled) document.getElementById('auto-toggle').classList.add('active');
+            }
             
-            if (lastfm.api_key) document.getElementById('lastfm-key').value = lastfm.api_key;
-            if (lastfm.api_secret) document.getElementById('lastfm-secret').value = lastfm.api_secret;
-            if (lastfm.session_key) document.getElementById('lastfm-session').value = lastfm.session_key;
-            if (interval) document.getElementById('interval-select').value = interval;
-            
-            updateGoogleButton();
+            updateYTState();
         }
 
-        // Check URL for Google callback
+        // Clean up legacy URL params
         const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.get('google_auth') === 'success') {
-            toast('YouTube Music connected');
-            log('Google auth success');
-            updateGoogleButton();
-            window.history.replaceState({}, '', '/');
-        } else if (urlParams.get('google_auth') === 'error') {
-            toast('Google auth failed', 'error');
+        if (urlParams.get('google_auth')) {
             window.history.replaceState({}, '', '/');
         }
 
@@ -737,8 +919,7 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
-# Store for tracking scrobbled tracks
-scrobbled_tracks = set()
+# Scrobble tracking handled by persistent scrobbled.json
 
 
 def get_lastfm_network(config):
@@ -766,42 +947,67 @@ def get_lastfm_network(config):
         return None, str(e)
 
 
+def parse_browser_headers(header_str):
+    """The 'Final BOSS' Parser: Scans the entire text for auth nuggets regardless of formatting"""
+    if not header_str:
+        return None
+        
+    headers = {}
+    targets = ['cookie', 'authorization', 'user-agent', 'origin', 'referer', 'accept']
+    for t in targets:
+        # Match "key: value" or "key\nvalue"
+        pattern = rf'(?i)(?:^|[\n\r]){t}[:\s]+([^\n\r]+)'
+        match = re.search(pattern, header_str)
+        if match:
+            headers[t] = match.group(1).strip()
+            
+    # 2. X-Goog, X-Youtube, and other identity headers
+    # Broad capture for anything starting with x- and following some valid pattern
+    identity_headers = re.findall(r'(?i)(x-[a-z0-9-]+)[:\s]+([^\n\r]+)', header_str)
+    for k, v in identity_headers:
+        headers[k.lower()] = v.strip()
+
+    # 3. Emergency Cookie Rescue: Strictly hunt for __Secure-3PAPISID
+    if 'cookie' not in headers or '__Secure-3PAPISID' not in headers['cookie']:
+        sid_match = re.search(r'__Secure-3PAPISID=([^;]+)', header_str)
+        if sid_match:
+            val = sid_match.group(1).strip()
+            if 'cookie' not in headers:
+                headers['cookie'] = f'__Secure-3PAPISID={val};'
+            elif '__Secure-3PAPISID' not in headers['cookie']:
+                headers['cookie'] += f' __Secure-3PAPISID={val};'
+
+    # Fallback Origin
+    if 'origin' not in headers:
+        headers['origin'] = 'https://music.youtube.com'
+
+    return headers if headers else None
+
 def get_ytmusic_client(config):
-    """Initialize YT Music client"""
+    """Initialize YT Music client using browser headers"""
     ytmusic_config = config.get('ytmusic', {})
-    google_token = config.get('google_token')
     
-    # Try Google OAuth token first
-    if google_token:
+    # Prioritize Browser Headers
+    if 'headers' in ytmusic_config:
         try:
-            token_data = json.loads(google_token) if isinstance(google_token, str) else google_token
-            if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
-                oauth_creds = OAuthCredentials(client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
-                ytmusic = YTMusic(auth=token_data, oauth_credentials=oauth_creds)
+            headers = parse_browser_headers(ytmusic_config['headers'])
+            if headers:
+                yt_headers = requests.structures.CaseInsensitiveDict(headers)
+                return YTMusic(auth=yt_headers), None
             else:
-                ytmusic = YTMusic(auth=token_data)
-            return ytmusic, None
+                return None, "Invalid header format"
         except Exception as e:
-            pass
-    
+            print(f"[DEBUG] Header auth failed: {e}")
+            return None, f"Header error: {str(e)}"
+
     if not ytmusic_config:
         return None, "Not configured"
     
     try:
-        # OAuth format
-        if 'access_token' in ytmusic_config:
-            if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
-                oauth_creds = OAuthCredentials(client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET)
-                ytmusic = YTMusic(auth=ytmusic_config, oauth_credentials=oauth_creds)
-            else:
-                ytmusic = YTMusic(auth=ytmusic_config)
-            return ytmusic, None
-        # Browser headers format
-        elif 'cookie' in ytmusic_config or 'Cookie' in ytmusic_config:
-            ytmusic = YTMusic(auth=ytmusic_config)
-            return ytmusic, None
+        if 'cookie' in ytmusic_config or 'Cookie' in ytmusic_config:
+            return YTMusic(auth=ytmusic_config), None
         else:
-            return None, "Invalid format"
+            return None, "Please connect with browser headers"
     except Exception as e:
         return None, str(e)
 
@@ -811,83 +1017,39 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 
-@app.route('/api/google-auth')
-def google_auth():
-    """Start Google OAuth flow"""
-    if not GOOGLE_CLIENT_ID:
-        return jsonify({'error': 'Google OAuth not configured'}), 400
-    
-    state = secrets.token_urlsafe(32)
-    session['oauth_state'] = state
-    
-    params = {
-        'client_id': GOOGLE_CLIENT_ID,
-        'redirect_uri': GOOGLE_REDIRECT_URI,
-        'response_type': 'code',
-        'scope': ' '.join(GOOGLE_SCOPES),
-        'access_type': 'offline',
-        'prompt': 'consent',
-        'state': state
-    }
-    
-    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
-    return redirect(auth_url)
+# Simple page template
+SIMPLE_PAGE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title} - YT Scrobbler</title>
+    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com{path}">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #000; color: #fafafa; line-height: 1.6; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 48px 24px; }}
+        h1 {{ font-size: 24px; margin-bottom: 24px; }}
+        p {{ color: #a1a1aa; margin-bottom: 16px; }}
+        a {{ color: #fafafa; }}
+        .back {{ margin-top: 32px; display: inline-block; color: #71717a; text-decoration: none; }}
+        .back:hover {{ color: #fafafa; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{title}</h1>
+        {content}
+        <a class="back" href="/">← Back</a>
+    </div>
+    <script src="/_vercel/insights/script.js" defer></script>
+</body>
+</html>
+'''
 
 
-@app.route('/api/google-callback')
-def google_callback():
-    """Handle Google OAuth callback"""
-    code = request.args.get('code')
-    error = request.args.get('error')
-    
-    if error:
-        return redirect('/?google_auth=error')
-    
-    if not code:
-        return redirect('/?google_auth=error')
-    
-    try:
-        # Exchange code for tokens
-        token_response = requests.post('https://oauth2.googleapis.com/token', data={
-            'client_id': GOOGLE_CLIENT_ID,
-            'client_secret': GOOGLE_CLIENT_SECRET,
-            'code': code,
-            'grant_type': 'authorization_code',
-            'redirect_uri': GOOGLE_REDIRECT_URI
-        })
-        
-        if token_response.status_code != 200:
-            return redirect('/?google_auth=error')
-        
-        tokens = token_response.json()
-        
-        # Format for ytmusicapi
-        oauth_token = {
-            'access_token': tokens.get('access_token'),
-            'refresh_token': tokens.get('refresh_token'),
-            'token_type': tokens.get('token_type', 'Bearer'),
-            'expires_at': int(time.time()) + tokens.get('expires_in', 3600),
-            'expires_in': tokens.get('expires_in', 3600),
-            'scope': tokens.get('scope', '')
-        }
-        
-        # Return HTML that saves token and redirects
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head><title>Success</title></head>
-        <body>
-            <script>
-                localStorage.setItem('google_token', JSON.stringify({json.dumps(oauth_token)}));
-                localStorage.setItem('ytmusic', JSON.stringify({json.dumps(oauth_token)}));
-                window.location.href = '/?google_auth=success';
-            </script>
-        </body>
-        </html>
-        '''
-    except Exception as e:
-        print(f"OAuth error: {e}")
-        return redirect('/?google_auth=error')
+# Removed Google OAuth Routes
 
 
 @app.route('/api/status', methods=['POST'])
@@ -909,10 +1071,23 @@ def status():
     ytmusic, _ = get_ytmusic_client(config)
     if ytmusic:
         try:
-            ytmusic.get_library_songs(limit=1)
+            # 1. Try history first
+            ytmusic.get_history()
             ytmusic_status = {'connected': True}
-        except:
-            ytmusic_status = {'connected': False}
+        except Exception as e:
+            import traceback
+            print(f"Status check error (History): {e}")
+            traceback.print_exc()
+            try:
+                # 2. Key Fallback: Try search if history fails
+                # This helps verify if connection works even if history is empty/buggy
+                ytmusic.search("test", limit=1)
+                ytmusic_status = {'connected': True, 'warning': "History unavailable"}
+            except Exception as e2:
+                import traceback
+                print(f"Status check error (Search): {e2}")
+                traceback.print_exc()
+                ytmusic_status = {'connected': False}
     else:
         ytmusic_status = {'connected': False}
     
@@ -932,15 +1107,18 @@ def history():
         
         tracks = []
         for item in history[:20]:
-            if item.get('videoId'):
-                track_id = f"{item.get('title')}_{item.get('artists', [{}])[0].get('name', 'Unknown')}"
-                tracks.append({
-                    'title': item.get('title', 'Unknown'),
-                    'artist': item.get('artists', [{}])[0].get('name', 'Unknown'),
-                    'album': item.get('album', {}).get('name', ''),
-                    'videoId': item.get('videoId'),
-                    'scrobbled': track_id in scrobbled_tracks
-                })
+            title = item.get('title', 'Unknown')
+            artist = item.get('artists', [{}])[0].get('name', 'Unknown')
+            # Use videoId if available, else fallback to title_artist hash
+            track_uid = item.get('videoId') or f"{title}_{artist}"
+            
+            tracks.append({
+                'title': title,
+                'artist': artist,
+                'album': item.get('album', {}).get('name', '') if item.get('album') else '',
+                'videoId': item.get('videoId') or 'no-id',
+                'scrobbled': track_uid in scrobbled_tracks
+            })
         
         return jsonify({'tracks': tracks})
     except Exception as e:
@@ -960,22 +1138,36 @@ def scrobble():
         return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
     
     try:
+        # Load fresh from disk
+        global scrobbled_tracks
+        scrobbled_tracks = load_scrobbles()
+        
+        # Optional: Sync with Last.fm if scrobbled_tracks is small or on demand
+        # To keep it "fast and smooth", we only do this if it hasn't been done this session
+        if not getattr(app, '_lastfm_synced', False):
+            try:
+                recent = network.get_user(network.get_authenticated_user()).get_recent_tracks(limit=50)
+                for r in recent:
+                    # Create UID from Last.fm data
+                    r_uid = f"{r.track.title}_{r.track.artist.name}"
+                    scrobbled_tracks.add(r_uid)
+                app._lastfm_synced = True
+            except:
+                pass
+
         history = ytmusic.get_history()
         
         scrobbled_count = 0
         current_time = int(time.time())
         
-        for i, item in enumerate(history[:10]):
-            if not item.get('videoId'):
-                continue
-            
+        # Safe limit: 50 items
+        for i, item in enumerate(history[:50]):
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
-            album = item.get('album', {}).get('name', '')
+            album = item.get('album', {}).get('name', '') if item.get('album') else ''
+            track_uid = item.get('videoId') or f"{title}_{artist}"
             
-            track_id = f"{title}_{artist}"
-            
-            if track_id in scrobbled_tracks:
+            if track_uid in scrobbled_tracks:
                 continue
             
             try:
@@ -986,7 +1178,8 @@ def scrobble():
                     timestamp=timestamp,
                     album=album if album else None
                 )
-                scrobbled_tracks.add(track_id)
+                scrobbled_tracks.add(track_uid)
+                save_scrobble(track_uid)
                 scrobbled_count += 1
             except Exception as e:
                 print(f"Error scrobbling {title}: {e}")
@@ -994,6 +1187,90 @@ def scrobble():
         return jsonify({'success': True, 'count': scrobbled_count})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+# Background Worker
+class BackgroundScrobbler:
+    def __init__(self):
+        self.thread = None
+        self.stop_event = threading.Event()
+        
+    def run(self):
+        print("[INFO] Background Scrobbler Started")
+        while not self.stop_event.is_set():
+            config = ConfigManager.load()
+            auto_enabled = config.get('auto_scrobble') == True
+            interval = int(config.get('interval', 300))
+            
+            if auto_enabled:
+                print(f"[INFO] Background Sync: Starting... (Interval: {interval}s)")
+                try:
+                    # Reuse the scrobble logic but in a fake request context or directly
+                    # For simplicity, we'll call a helper that doesn't rely on Flask's 'request'
+                    self._perform_sync(config)
+                except Exception as e:
+                    print(f"[ERROR] Background Sync failed: {e}")
+            
+            # Wait for interval or stop event
+            self.stop_event.wait(interval)
+
+    def _perform_sync(self, config):
+        network, _ = get_lastfm_network(config)
+        ytmusic, _ = get_ytmusic_client(config)
+        
+        if not network or not ytmusic:
+            return
+            
+        global scrobbled_tracks
+        scrobbled_tracks = load_scrobbles()
+        
+        history = ytmusic.get_history()
+        current_time = int(time.time())
+        scrobbled_count = 0
+        
+        for i, item in enumerate(history[:50]):
+            title = item.get('title', 'Unknown')
+            artist = item.get('artists', [{}])[0].get('name', 'Unknown')
+            album = item.get('album', {}).get('name', '') if item.get('album') else ''
+            track_uid = item.get('videoId') or f"{title}_{artist}"
+            
+            if track_uid in scrobbled_tracks:
+                continue
+            
+            try:
+                timestamp = current_time - (i * 180)
+                network.scrobble(
+                    artist=artist,
+                    title=title,
+                    timestamp=timestamp,
+                    album=album if album else None
+                )
+                save_scrobble(track_uid)
+                scrobbled_count += 1
+            except:
+                pass
+        
+        if scrobbled_count > 0:
+            print(f"[INFO] Background Sync: Scrobbled {scrobbled_count} tracks")
+
+    def start(self):
+        if self.thread is None or not self.thread.is_alive():
+            self.stop_event.clear()
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+
+# Initialize background worker
+bg_scrobbler = BackgroundScrobbler()
+bg_scrobbler.start()
+
+@app.route('/api/config', methods=['GET', 'POST'])
+def handle_config():
+    # Simple Security: If running locally, allow. If on Vercel, allow via session/secret.
+    # Since this is primarily a local tool, we'll keep it simple.
+    if request.method == 'POST':
+        new_config = request.json
+        ConfigManager.save(new_config)
+        return jsonify({'success': True})
+    return jsonify(ConfigManager.load())
 
 
 @app.route('/api/lastfm-callback')
