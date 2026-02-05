@@ -1,76 +1,90 @@
 # YT Music Scrobbler 🎵
 
-Automatically scrobble your YouTube Music listening history to Last.fm. This scrobbler works for **all devices** (Phone, PC, TV, Nest) by reading your central YouTube Watch History.
+Automatically scrobble your YouTube Music listening history to Last.fm. Works for **all devices** (Phone, PC, TV, Nest) by reading your central YouTube Watch History.
 
-### 🌟 Features
-- **Header-Based Sync:** Connects using industry-standard browser headers for maximum reliability.
-- **Background Sync:** Once enabled, the server scrobbles in the background even if the browser tab is closed.
-- **Smart Repeat Detection:** Uses track duration to correctly scrobble songs played on repeat (overcoming YouTube Music's history limitations).
-- **Auto-Refreshing UI:** The dashboard updates your history in real-time as background scrobbles complete.
-- **Persistent Tracking:** Never scrobbles the same track twice, even after a server restart.
-- **Multi-User Support:** Deploy once, support unlimited users (with Supabase).
-- **No Complex API Setup:** No need for Google Cloud Console OAuth setup.
-- **Light/Dark Mode:** Dynamic, premium interface.
+**Live:** [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
 
-## 🚀 Getting Started
+## 🌟 Features
+- **Google Sign-In:** Secure authentication with your Google account
+- **Multi-User Support:** Each user gets their own scrobble history stored in the cloud
+- **Cross-Device Sync:** Listen on any device, scrobbles sync automatically
+- **Background Sync:** Vercel Cron scrobbles every 5 minutes, even when you're away
+- **Smart Deduplication:** Triple-UID system prevents duplicate scrobbles
+- **Real-Time Dashboard:** See your scrobbles update live
+- **Persistent Storage:** Supabase database ensures nothing is lost
 
-### 1. Requirements
+## 🚀 Quick Start (User)
+
+1. Go to [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
+2. Sign in with Google
+3. Connect your Last.fm account (enter API Key/Secret, authorize)
+4. Paste your YT Music browser headers
+5. Enable Auto Scrobble - done!
+
+Your listening history from any device will now scrobble automatically.
+
+---
+
+## 🛠️ Self-Hosting
+
+### Requirements
 - Python 3.8+
-- Last.fm API Key (Get it from [last.fm/api](https://www.last.fm/api/account/create))
+- Supabase account (free)
+- Google Cloud Console project (for OAuth)
+- Vercel account (for deployment)
 
-### 2. Installation
+### 1. Database Setup (Supabase)
+1. Create a project at [supabase.com](https://supabase.com)
+2. Run `schema.sql` in SQL Editor
+3. Get your API URL and anon key from Settings > API
+
+### 2. Google OAuth Setup
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a project → APIs & Services → Credentials
+3. Create OAuth 2.0 Client ID (Web application)
+4. Add authorized redirect URI: `https://your-domain.com/auth/google/callback`
+5. Copy Client ID and Client Secret
+
+### 3. Deploy to Vercel
+1. Fork this repo
+2. Connect to Vercel
+3. Add environment variables:
+   ```
+   SUPABASE_URL=https://xxx.supabase.co
+   SUPABASE_KEY=your-anon-key
+   GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
+   GOOGLE_CLIENT_SECRET=GOCSPX-xxx
+   GOOGLE_REDIRECT_URI=https://your-domain.com/auth/google/callback
+   SECRET_KEY=random-secret-for-sessions
+   ```
+4. Deploy!
+
+### 4. Local Development
 ```bash
 git clone https://github.com/kuberbassi/ytmusic-scrobbler.git
 cd ytmusic-scrobbler
 pip install -r requirements.txt
-```
-
-### 3. Run Locally
-```bash
+# Create .env with the variables above (use localhost:3000 for redirect)
 python local_run.py
 ```
-Open `http://localhost:3000` in your browser.
 
-### 4. Setup
-1.  **Last.fm:** Enter your API Key/Secret and click "Authorize".
-2.  **YT Music:** Paste your browser headers from the Network tab (see [instructions](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html)).
-3.  **Go!** Enable "Auto Scrobble" and close the tab. The scrobbler will keep working in the background.
+## 📱 How It Works
 
-## 📱 Mobile Support
-This scrobbler reads your **Global YouTube Watch History**. As long as your phone is logged into the same YouTube account and "Watch History" is enabled, your mobile listening will be scrobbled automatically!
+1. **Authentication:** Users sign in with Google → stored in `users` table
+2. **Credentials:** Each user saves their Last.fm + YT Music credentials → stored per-user in Supabase
+3. **Background Sync:** Vercel Cron calls `/api/cron` every 5 minutes
+4. **Scrobble Logic:** Fetches YT Music history → checks against stored scrobbles → sends new ones to Last.fm
+5. **Deduplication:** Triple-UID system (videoId, title_artist, normalized) ensures no duplicates
 
----
+## 🏗️ Architecture
 
-## 🌐 Multi-User Deployment (Production)
-
-For deploying a public instance that supports multiple users:
-
-### 1. Set Up Supabase (Free)
-1. Create a project at [supabase.com](https://supabase.com)
-2. Go to SQL Editor and run the contents of `schema.sql`
-3. Get your API URL and anon key from Settings > API
-
-### 2. Deploy to Vercel
-1. Fork/clone this repo
-2. Connect to Vercel
-3. Add environment variables:
-   - `SUPABASE_URL` - Your Supabase project URL
-   - `SUPABASE_KEY` - Your Supabase anon/public key
-   - `CRON_SECRET` (optional) - Secret for cron endpoint protection
-
-### 3. How Multi-User Works
-- Each user is identified by their Last.fm username
-- Credentials and scrobble history stored per-user in Supabase
-- Background sync runs via Vercel Cron (every 5 minutes)
-- Users can enable/disable auto-scrobble independently
-
-### Architecture
-| Mode | Storage | Background Sync | Users |
-|------|---------|-----------------|-------|
-| Single-user (local) | JSON files | Threading | 1 |
-| Multi-user (Vercel) | Supabase | Vercel Cron | Unlimited |
-
----
+| Component | Technology |
+|-----------|------------|
+| Backend | Flask (Python) |
+| Database | Supabase (PostgreSQL) |
+| Auth | Google OAuth 2.0 |
+| Hosting | Vercel (Serverless) |
+| Background Jobs | Vercel Cron |
 
 ## 📄 License
-MIT License.
+MIT License
