@@ -71,6 +71,9 @@ HTML_TEMPLATE = '''
     <meta property="og:description" content="Sync YouTube Music to Last.fm automatically">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://ytscrobbler.kuberbassi.com">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="YT Music Scrobbler">
+    <meta name="twitter:description" content="Automatically scrobble your YouTube Music listening history to Last.fm.">
     <link rel="canonical" href="https://ytscrobbler.kuberbassi.com">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%23000' rx='20' width='100' height='100'/><polygon fill='%23fff' points='35,25 35,75 75,50'/></svg>">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1015,6 +1018,19 @@ def get_ytmusic_client(config):
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route('/robots.txt')
+def robots():
+    return "User-agent: *\nAllow: /\nSitemap: https://ytscrobbler.kuberbassi.com/sitemap.xml", 200, {'Content-Type': 'text/plain'}
+
+@app.route('/sitemap.xml')
+def sitemap():
+    return '''<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://ytscrobbler.kuberbassi.com/</loc><priority>1.0</priority></url>
+  <url><loc>https://ytscrobbler.kuberbassi.com/privacy</loc><priority>0.5</priority></url>
+  <url><loc>https://ytscrobbler.kuberbassi.com/terms</loc><priority>0.5</priority></url>
+</urlset>''', 200, {'Content-Type': 'application/xml'}
 
 
 # Simple page template
