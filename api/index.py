@@ -679,8 +679,8 @@ HTML_TEMPLATE = '''
         </div>
     </header>
 
-    <!-- Login Screen (shown when multi-user and not logged in) -->
-    <div id="login-screen" class="login-screen" style="display: none;">
+    <!-- Login Screen (shown by default until authenticated) -->
+    <div id="login-screen" class="login-screen" style="display: flex;">
         <div class="login-logo">🎵</div>
         <h1 class="login-title">YT Music Scrobbler</h1>
         <p class="login-subtitle">Sign in to sync your YouTube Music listening history to Last.fm automatically</p>
@@ -696,7 +696,7 @@ HTML_TEMPLATE = '''
         </button>
     </div>
 
-    <main id="main-app" class="container">
+    <main id="main-app" class="container" style="display: none;">
         <h1>YT Music → Last.fm</h1>
         <p class="subtitle">Scrobble your YouTube Music history automatically</p>
 
@@ -1239,9 +1239,9 @@ HTML_TEMPLATE = '''
                     mainApp.style.display = 'none';
                 }
             } catch (e) {
-                // On error, default to guest mode
-                document.getElementById('login-screen').style.display = 'none';
-                document.getElementById('main-app').style.display = 'block';
+                // On error, show login screen
+                document.getElementById('login-screen').style.display = 'flex';
+                document.getElementById('main-app').style.display = 'none';
             }
         }
         
