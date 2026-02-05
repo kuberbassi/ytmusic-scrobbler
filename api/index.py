@@ -15,6 +15,18 @@ import threading
 # Global Sync State
 scrobble_lock = threading.Lock()
 last_sync_time = 0
+sync_logs = [] # List of [timestamp, artist, title, status]
+
+def add_sync_log(artist, title, status="Synced"):
+    global sync_logs
+    entry = {
+        'time': int(time.time()),
+        'artist': artist,
+        'title': title,
+        'status': status
+    }
+    sync_logs.insert(0, entry)
+    sync_logs = sync_logs[:20] # Keep last 20
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
@@ -47,6 +59,10 @@ scrobbled_tracks = load_scrobbles()
 def get_track_duration(yt_track):
     """Safely extract duration in seconds from YTMusic track object"""
     try:
+        # Check integer field first
+        if 'duration_seconds' in yt_track:
+            return int(yt_track['duration_seconds'])
+            
         duration_str = yt_track.get('duration')
         if not duration_str: return 180 # Default 3 mins
         if ':' in duration_str:
@@ -368,8 +384,10 @@ HTML_TEMPLATE = '''
 
         /* Log */
         .log { font-family: 'SF Mono', Monaco, 'Courier New', monospace; font-size: 12px; max-height: 120px; overflow-y: auto; }
-        .log-entry { padding: 4px 0; color: var(--text-secondary); }
-        .log-entry .time { color: var(--text-tertiary); }
+        .log-entry { padding: 4px 0; color: var(--text-secondary); line-height: 1.4; border-bottom: 1px solid rgba(255,255,255,0.03); }
+        .log-entry .time { color: var(--text-tertiary); margin-right: 4px; }
+        .log-entry.error { color: var(--error); }
+        .log-entry b { color: var(--text-primary); }
 
         /* Empty */
         .empty { text-align: center; padding: 32px; color: var(--text-tertiary); font-size: 13px; }
@@ -690,11 +708,23 @@ HTML_TEMPLATE = '''
                 });
                 const data = await res.json();
                 
-                // Auto-refresh history if server has synced
+                // Update Search Logs from Server
+                if (data.logs && data.logs.length > 0) {
+                    const l = document.getElementById('log');
+                    l.innerHTML = data.logs.map(entry => {
+                        const time = new Date(entry.time * 1000).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+                        const statusClass = entry.status.includes('Error') ? 'error' : '';
+                        return `<div class="log-entry ${statusClass}">
+                            <span class="time">[${time}]</span> 
+                            <b>${entry.artist}</b> - ${entry.title} 
+                            <span style="font-size:10px;color:var(--text-tertiary);float:right;">${entry.status}</span>
+                        </div>`;
+                    }).join('');
+                }
+
                 if (data.last_sync > lastSyncTimestamp) {
                     lastSyncTimestamp = data.last_sync;
                     loadHistory();
-                    if (data.last_track) log('Synced: ' + data.last_track);
                 }
 
                 // Update Status Badges
@@ -1157,14 +1187,15 @@ def status():
     else:
         ytmusic_status = {'connected': False}
     
-    global last_sync_time
+    global last_sync_time, sync_logs
     history, meta = load_scrobbles()
     return jsonify({
         'lastfm': lastfm_status, 
         'ytmusic': ytmusic_status,
         'last_sync': last_sync_time,
         'now': int(time.time()),
-        'last_track': meta.get('track_title')
+        'last_track': meta.get('track_title'),
+        'logs': sync_logs
     })
 
 
@@ -1252,6 +1283,11 @@ def scrobble():
                 else:
                     continue
             
+            # Guard: Only scrobble the first few items if they are "new" to us
+            # to avoid scrobbling very old history on first run.
+            if i > 25:
+                continue
+            
             try:
                 with scrobble_lock:
                     timestamp = current_time - (i * 180)
@@ -1266,9 +1302,11 @@ def scrobble():
                         'timestamp': timestamp,
                         'track_title': title
                     })
+                    add_sync_log(artist, title)
                     scrobbled_count += 1
             except Exception as e:
                 print(f"Error scrobbling {title}: {e}")
+                add_sync_log(artist, title, status=f"Error: {str(e)[:20]}")
         
         return jsonify({'success': True, 'count': scrobbled_count})
     except Exception as e:
@@ -1328,6 +1366,10 @@ class BackgroundScrobbler:
                 else:
                     continue
             
+            # Guard: Only sync extremely recent items in background (top 15)
+            if i > 15:
+                continue
+            
             try:
                 with scrobble_lock:
                     timestamp = current_time - (i * 180)
@@ -1342,9 +1384,11 @@ class BackgroundScrobbler:
                         'timestamp': timestamp,
                         'track_title': title
                     })
+                    add_sync_log(artist, title)
                     scrobbled_count += 1
-            except:
-                pass
+            except Exception as e:
+                print(f"Background scrobble error: {e}")
+                add_sync_log(artist, title, status="Error")
         
         if scrobbled_count > 0:
             global last_sync_time
