@@ -1452,6 +1452,72 @@ def sitemap():
 </urlset>''', 200, {'Content-Type': 'application/xml'}
 
 
+# --- Terms and Privacy Pages ---
+
+@app.route('/terms')
+def terms():
+        return render_template_string("""
+        <html><head><title>Terms of Service</title>
+        <style>
+        .back-btn { display:inline-block;padding:10px 22px;background:#222;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;margin-top:24px;transition:background 0.2s; }
+        .back-btn:hover { background:#444; }
+        </style></head><body style='font-family:sans-serif;max-width:700px;margin:40px auto;'>
+        <h1>Terms of Service</h1>
+        <p>Welcome to YT Music Scrobbler. By using this service, you agree to the following terms:</p>
+        <ol>
+            <li><b>Service Description:</b> YT Music Scrobbler allows you to sync your YouTube Music listening history to Last.fm. You must sign in with your Google account and connect your Last.fm account to use the service.</li>
+            <li><b>Account Registration:</b> You must use a valid Google account. Your Google ID, email, name, and profile picture are stored securely in our database (Supabase).</li>
+            <li><b>User Data:</b> You provide Last.fm API credentials and YT Music browser headers to enable scrobbling. These are stored per-user in the database and are <b>not accessible to the service operator</b> except as required for the service to function. Credentials are never shared or sold.</li>
+            <li><b>Acceptable Use:</b> You agree not to abuse the service, attempt to break rate limits, or use the service for unauthorized or illegal activity.</li>
+            <li><b>Data Security:</b> We use industry-standard security practices, including HTTPS, secure storage, and security headers. However, no system is perfectly secure.</li>
+            <li><b>Service Availability:</b> The service is provided "as is" with no guarantee of uptime or data retention. We may modify or discontinue the service at any time.</li>
+            <li><b>Termination:</b> We reserve the right to suspend or terminate your access if you violate these terms or abuse the service.</li>
+            <li><b>Changes:</b> Terms may be updated at any time. Continued use after changes constitutes acceptance.</li>
+            <li><b>Contact:</b> For questions or data deletion requests, contact the maintainer at <a href='https://kuberbassi.com' target='_blank'>kuberbassi.com</a>.</li>
+        </ol>
+        <a href="/" class="back-btn">← Back to Home</a>
+        </body></html>
+        """)
+
+
+@app.route('/privacy')
+def privacy():
+        return render_template_string("""
+        <html><head><title>Privacy Policy</title>
+        <style>
+        .back-btn { display:inline-block;padding:10px 22px;background:#222;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;margin-top:24px;transition:background 0.2s; }
+        .back-btn:hover { background:#444; }
+        </style></head><body style='font-family:sans-serif;max-width:700px;margin:40px auto;'>
+        <h1>Privacy Policy</h1>
+        <p>Your privacy is important. This policy explains what data we collect and how it is used:</p>
+        <ol>
+            <li><b>Information Collected:</b>
+                <ul>
+                    <li>Google account info (ID, email, name, picture) via OAuth for authentication and user identification.</li>
+                    <li>Last.fm API credentials and YT Music browser headers, provided by you, to enable scrobbling. These are stored per-user in the database and <b>not accessible to the service operator</b> except as required for the service to function. Credentials are never shared or sold.</li>
+                    <li>Scrobble history and sync logs, stored per-user.</li>
+                    <li>IP address and request metadata for rate limiting and security.</li>
+                </ul>
+            </li>
+            <li><b>How Data Is Used:</b>
+                <ul>
+                    <li>To authenticate you and provide the scrobbling service.</li>
+                    <li>To sync your YouTube Music history to your Last.fm account.</li>
+                    <li>To enforce rate limits and protect against abuse.</li>
+                </ul>
+            </li>
+            <li><b>Data Storage:</b> All user data is stored securely in Supabase (PostgreSQL). Credentials are never shared or sold. No cookies are used for tracking; Flask sessions are used for login state only.</li>
+            <li><b>Third Parties:</b> No analytics or ad networks are used. Vercel Insights may collect basic serverless usage data for operational monitoring only.</li>
+            <li><b>Data Deletion:</b> You may request deletion of your account and all associated data at any time by contacting the maintainer.</li>
+            <li><b>Security:</b> We use HTTPS, secure storage, and security headers. However, no system is perfectly secure.</li>
+            <li><b>Policy Updates:</b> This policy may be updated. Continued use after changes constitutes acceptance.</li>
+            <li><b>Contact:</b> For privacy questions or data deletion, contact <a href='https://kuberbassi.com' target='_blank'>kuberbassi.com</a>.</li>
+        </ol>
+        <a href="/" class="back-btn">← Back to Home</a>
+        </body></html>
+        """)
+
+
 @app.route('/api/health')
 def health_check():
     """Health check endpoint for monitoring"""
