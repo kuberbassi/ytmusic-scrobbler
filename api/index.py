@@ -1405,17 +1405,6 @@ HTML_TEMPLATE = '''
             }
         }, 10000);
     </script>
-    
-    <!-- Site Footer -->
-    <footer id="site-footer" class="site-footer">
-        <span>© 2024 YT Music Scrobbler</span>
-        <span class="footer-divider">•</span>
-        <a href="/terms">Terms of Service</a>
-        <span class="footer-divider">•</span>
-        <a href="/privacy">Privacy Policy</a>
-        <span class="footer-divider">•</span>
-        <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
-    </footer>
 </body>
 </html>
 '''
@@ -1692,16 +1681,22 @@ LEGAL_PAGE_TEMPLATE = '''
     <main class="container">
         <div class="page-header">
             <h1>{title}</h1>
-            <p class="last-updated">Last updated: February 2024</p>
+            <p class="last-updated">Last updated: <span id="last-updated-year"></span></p>
         </div>
         {content}
     </main>
     <footer class="footer">
-        <span>© 2024 YT Music Scrobbler</span>
+        <span>© <span id="footer-year"></span> YT Music Scrobbler</span>
         <a href="/terms">Terms</a>
         <a href="/privacy">Privacy</a>
         <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
     </footer>
+    <script>
+        const year = new Date().getFullYear();
+        document.getElementById('footer-year').textContent = year;
+        const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+        document.getElementById('last-updated-year').textContent = months[new Date().getMonth()] + ' ' + year;
+    </script>
 </body>
 </html>
 '''
