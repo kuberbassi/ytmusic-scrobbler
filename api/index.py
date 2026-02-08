@@ -720,13 +720,14 @@ HTML_TEMPLATE = '''
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            min-height: 80vh;
+            min-height: calc(100vh - 108px);
             text-align: center;
-            padding: 24px;
+            padding: 48px 24px;
         }
-        .login-logo { font-size: 48px; margin-bottom: 24px; }
-        .login-title { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
-        .login-subtitle { color: var(--text-secondary); margin-bottom: 32px; max-width: 400px; }
+        .login-hero { max-width: 540px; margin-bottom: 40px; }
+        .login-logo { font-size: 56px; margin-bottom: 16px; }
+        .login-title { font-size: 32px; font-weight: 700; margin-bottom: 12px; letter-spacing: -0.5px; }
+        .login-subtitle { color: var(--text-secondary); font-size: 16px; line-height: 1.6; margin-bottom: 0; max-width: 460px; }
         .login-btn {
             display: inline-flex;
             align-items: center;
@@ -740,14 +741,46 @@ HTML_TEMPLATE = '''
             background: var(--bg-elevated);
             color: var(--text-primary);
             transition: all 0.2s;
+            margin-bottom: 32px;
         }
-        .login-btn:hover { border-color: var(--border-hover); background: var(--bg-tertiary); }
+        .login-btn:hover { border-color: var(--border-hover); background: var(--bg-tertiary); transform: translateY(-1px); }
         .login-btn svg { width: 20px; height: 20px; }
+        .features-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; max-width: 480px; margin-bottom: 32px; }
+        @media (max-width: 500px) { .features-grid { grid-template-columns: 1fr; } }
+        .feature-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            text-align: left;
+            padding: 14px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .feature-icon { font-size: 18px; flex-shrink: 0; }
+        .feature-text h4 { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+        .feature-text p { font-size: 12px; color: var(--text-tertiary); line-height: 1.4; }
+        .login-note { font-size: 12px; color: var(--text-tertiary); max-width: 400px; }
         .user-menu { display: flex; align-items: center; gap: 12px; }
         .user-avatar { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); }
         .user-name { font-size: 13px; color: var(--text-secondary); }
         .logout-btn { font-size: 12px; color: var(--text-tertiary); cursor: pointer; text-decoration: none; }
         .logout-btn:hover { color: var(--text-primary); }
+        /* Site Footer */
+        .site-footer {
+            border-top: 1px solid var(--border);
+            padding: 20px 24px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 24px;
+            font-size: 12px;
+            color: var(--text-tertiary);
+            background: var(--bg-secondary);
+        }
+        .site-footer a { color: var(--text-tertiary); text-decoration: none; transition: color 0.15s; }
+        .site-footer a:hover { color: var(--text-primary); }
+        .footer-divider { color: var(--border); }
     </style>
 </head>
 <body data-theme="dark">
@@ -770,15 +803,50 @@ HTML_TEMPLATE = '''
 
     <!-- Login Screen (shown by default until authenticated) -->
     <div id="login-screen" class="login-screen" style="display: flex;">
-        <div class="login-logo">🎵</div>
-        <h1 class="login-title">YT Music Scrobbler</h1>
-        <p class="login-subtitle">Sign in to sync your YouTube Music listening history to Last.fm automatically</p>
+        <div class="login-hero">
+            <div class="login-logo">🎵</div>
+            <h1 class="login-title">YT Music Scrobbler</h1>
+            <p class="login-subtitle">
+                Automatically sync your YouTube Music listening history to Last.fm. 
+                Works across all your devices — Phone, PC, TV, Nest speakers, and more.
+            </p>
+        </div>
         <a href="/auth/google" class="login-btn">
             <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
             Sign in with Google
         </a>
-        <p style="margin-top: 24px; font-size: 12px; color: var(--text-tertiary);">
-            Your data is securely stored and synced across devices
+        <div class="features-grid">
+            <div class="feature-item">
+                <span class="feature-icon">📱</span>
+                <div class="feature-text">
+                    <h4>Multi-Device</h4>
+                    <p>Scrobbles from any device you use</p>
+                </div>
+            </div>
+            <div class="feature-item">
+                <span class="feature-icon">⚡</span>
+                <div class="feature-text">
+                    <h4>Automatic Sync</h4>
+                    <p>Background sync every 5 minutes</p>
+                </div>
+            </div>
+            <div class="feature-item">
+                <span class="feature-icon">🔒</span>
+                <div class="feature-text">
+                    <h4>Secure Storage</h4>
+                    <p>Your data stays safe and private</p>
+                </div>
+            </div>
+            <div class="feature-item">
+                <span class="feature-icon">🌐</span>
+                <div class="feature-text">
+                    <h4>Free & Open Source</h4>
+                    <p>MIT licensed, community driven</p>
+                </div>
+            </div>
+        </div>
+        <p class="login-note">
+            Free to use • No tracking • Your credentials are never shared
         </p>
     </div>
 
@@ -1337,6 +1405,17 @@ HTML_TEMPLATE = '''
             }
         }, 10000);
     </script>
+    
+    <!-- Site Footer -->
+    <footer id="site-footer" class="site-footer">
+        <span>© 2024 YT Music Scrobbler</span>
+        <span class="footer-divider">•</span>
+        <a href="/terms">Terms of Service</a>
+        <span class="footer-divider">•</span>
+        <a href="/privacy">Privacy Policy</a>
+        <span class="footer-divider">•</span>
+        <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
+    </footer>
 </body>
 </html>
 '''
@@ -1452,70 +1531,298 @@ def sitemap():
 </urlset>''', 200, {'Content-Type': 'application/xml'}
 
 
-# --- Terms and Privacy Pages ---
+# --- Terms and Privacy Pages (Vercel-style premium design) ---
+
+LEGAL_PAGE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title} - YT Music Scrobbler</title>
+    <meta name="description" content="{meta_description}">
+    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com{path}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-primary: #000;
+            --bg-secondary: #0a0a0a;
+            --bg-elevated: #111;
+            --border: #262626;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1a1;
+            --text-tertiary: #737373;
+            --accent: #3b82f6;
+        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            line-height: 1.6;
+        }}
+        .header {{
+            border-bottom: 1px solid var(--border);
+            padding: 0 24px;
+            height: 56px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg-secondary);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }}
+        .logo {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            font-size: 14px;
+            color: var(--text-primary);
+            text-decoration: none;
+        }}
+        .logo svg {{ width: 22px; height: 22px; }}
+        .back-link {{
+            color: var(--text-tertiary);
+            text-decoration: none;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: color 0.15s;
+        }}
+        .back-link:hover {{ color: var(--text-primary); }}
+        .container {{
+            max-width: 680px;
+            margin: 0 auto;
+            padding: 48px 24px 80px;
+        }}
+        .page-header {{
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }}
+        h1 {{
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }}
+        .last-updated {{
+            font-size: 13px;
+            color: var(--text-tertiary);
+        }}
+        .section {{
+            margin-bottom: 32px;
+        }}
+        .section-title {{
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: var(--text-primary);
+        }}
+        .section-content {{
+            font-size: 14px;
+            color: var(--text-secondary);
+        }}
+        .section-content p {{
+            margin-bottom: 12px;
+        }}
+        .section-content ul {{
+            padding-left: 20px;
+            margin-top: 8px;
+        }}
+        .section-content li {{
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+        }}
+        .section-content li::marker {{
+            color: var(--text-tertiary);
+        }}
+        .highlight-box {{
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 18px;
+            margin: 16px 0;
+            font-size: 13px;
+        }}
+        .highlight-box strong {{
+            color: var(--text-primary);
+        }}
+        a {{
+            color: var(--accent);
+            text-decoration: none;
+        }}
+        a:hover {{
+            text-decoration: underline;
+        }}
+        .footer {{
+            border-top: 1px solid var(--border);
+            padding: 24px;
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-tertiary);
+            background: var(--bg-secondary);
+        }}
+        .footer a {{
+            color: var(--text-tertiary);
+            margin: 0 12px;
+        }}
+        .footer a:hover {{
+            color: var(--text-primary);
+            text-decoration: none;
+        }}
+    </style>
+</head>
+<body>
+    <header class="header">
+        <a href="/" class="logo">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg>
+            YT Music Scrobbler
+        </a>
+        <a href="/" class="back-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            Back to Home
+        </a>
+    </header>
+    <main class="container">
+        <div class="page-header">
+            <h1>{title}</h1>
+            <p class="last-updated">Last updated: February 2024</p>
+        </div>
+        {content}
+    </main>
+    <footer class="footer">
+        <span>© 2024 YT Music Scrobbler</span>
+        <a href="/terms">Terms</a>
+        <a href="/privacy">Privacy</a>
+        <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
+    </footer>
+</body>
+</html>
+'''
 
 @app.route('/terms')
 def terms():
-        return render_template_string("""
-        <html><head><title>Terms of Service</title>
-        <style>
-        .back-btn { display:inline-block;padding:10px 22px;background:#222;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;margin-top:24px;transition:background 0.2s; }
-        .back-btn:hover { background:#444; }
-        </style></head><body style='font-family:sans-serif;max-width:700px;margin:40px auto;'>
-        <h1>Terms of Service</h1>
-        <p>Welcome to YT Music Scrobbler. By using this service, you agree to the following terms:</p>
-        <ol>
-            <li><b>Service Description:</b> YT Music Scrobbler allows you to sync your YouTube Music listening history to Last.fm. You must sign in with your Google account and connect your Last.fm account to use the service.</li>
-            <li><b>Account Registration:</b> You must use a valid Google account. Your Google ID, email, name, and profile picture are stored securely in our database (Supabase).</li>
-            <li><b>User Data:</b> You provide Last.fm API credentials and YT Music browser headers to enable scrobbling. These are stored per-user in the database and are <b>not accessible to the service operator</b> except as required for the service to function. Credentials are never shared or sold.</li>
-            <li><b>Acceptable Use:</b> You agree not to abuse the service, attempt to break rate limits, or use the service for unauthorized or illegal activity.</li>
-            <li><b>Data Security:</b> We use industry-standard security practices, including HTTPS, secure storage, and security headers. However, no system is perfectly secure.</li>
-            <li><b>Service Availability:</b> The service is provided "as is" with no guarantee of uptime or data retention. We may modify or discontinue the service at any time.</li>
-            <li><b>Termination:</b> We reserve the right to suspend or terminate your access if you violate these terms or abuse the service.</li>
-            <li><b>Changes:</b> Terms may be updated at any time. Continued use after changes constitutes acceptance.</li>
-            <li><b>Contact:</b> For questions or data deletion requests, contact the maintainer at <a href='https://kuberbassi.com' target='_blank'>kuberbassi.com</a>.</li>
-        </ol>
-        <a href="/" class="back-btn">← Back to Home</a>
-        </body></html>
-        """)
+    content = '''
+        <div class="section">
+            <h2 class="section-title">1. Service Description</h2>
+            <div class="section-content">
+                <p>YT Music Scrobbler is a free service that automatically syncs your YouTube Music listening history to Last.fm. To use this service, you must:</p>
+                <ul>
+                    <li>Sign in with a valid Google account</li>
+                    <li>Connect your Last.fm account</li>
+                    <li>Provide YT Music browser headers for authentication</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">2. Account & Data</h2>
+            <div class="section-content">
+                <p>Your Google ID, email, name, and profile picture are stored securely in our database (Supabase). Last.fm credentials and YT Music headers are stored per-user.</p>
+                <div class="highlight-box">
+                    <strong>Important:</strong> Your credentials are never shared or sold to third parties and are only used to provide the scrobbling service.
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">3. Acceptable Use</h2>
+            <div class="section-content">
+                <p>You agree not to:</p>
+                <ul>
+                    <li>Abuse the service or attempt to bypass rate limits</li>
+                    <li>Use the service for unauthorized or illegal activities</li>
+                    <li>Attempt to access other users' data</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">4. Service Availability</h2>
+            <div class="section-content">
+                <p>The service is provided "as is" with no guarantees of uptime or data retention. We reserve the right to modify or discontinue the service at any time. We may suspend or terminate your access if you violate these terms.</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">5. Changes & Contact</h2>
+            <div class="section-content">
+                <p>These terms may be updated at any time. Continued use after changes constitutes acceptance. For questions or data deletion requests, contact us at <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
+            </div>
+        </div>
+    '''
+    return render_template_string(LEGAL_PAGE_TEMPLATE.format(
+        title="Terms of Service",
+        meta_description="Terms of Service for YT Music Scrobbler - automatic YouTube Music to Last.fm scrobbling service",
+        path="/terms",
+        content=content
+    ))
 
 
 @app.route('/privacy')
 def privacy():
-        return render_template_string("""
-        <html><head><title>Privacy Policy</title>
-        <style>
-        .back-btn { display:inline-block;padding:10px 22px;background:#222;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;margin-top:24px;transition:background 0.2s; }
-        .back-btn:hover { background:#444; }
-        </style></head><body style='font-family:sans-serif;max-width:700px;margin:40px auto;'>
-        <h1>Privacy Policy</h1>
-        <p>Your privacy is important. This policy explains what data we collect and how it is used:</p>
-        <ol>
-            <li><b>Information Collected:</b>
+    content = '''
+        <div class="section">
+            <h2 class="section-title">1. Information We Collect</h2>
+            <div class="section-content">
+                <p>We collect the following information to provide our service:</p>
                 <ul>
-                    <li>Google account info (ID, email, name, picture) via OAuth for authentication and user identification.</li>
-                    <li>Last.fm API credentials and YT Music browser headers, provided by you, to enable scrobbling. These are stored per-user in the database and <b>not accessible to the service operator</b> except as required for the service to function. Credentials are never shared or sold.</li>
-                    <li>Scrobble history and sync logs, stored per-user.</li>
-                    <li>IP address and request metadata for rate limiting and security.</li>
+                    <li><strong>Google account info</strong> (ID, email, name, picture) via OAuth for authentication</li>
+                    <li><strong>Last.fm API credentials</strong> and <strong>YT Music browser headers</strong> to enable scrobbling</li>
+                    <li><strong>Scrobble history</strong> and sync logs, stored per-user</li>
+                    <li><strong>IP address</strong> and request metadata for rate limiting and security</li>
                 </ul>
-            </li>
-            <li><b>How Data Is Used:</b>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">2. How We Use Your Data</h2>
+            <div class="section-content">
                 <ul>
-                    <li>To authenticate you and provide the scrobbling service.</li>
-                    <li>To sync your YouTube Music history to your Last.fm account.</li>
-                    <li>To enforce rate limits and protect against abuse.</li>
+                    <li>To authenticate you and provide the scrobbling service</li>
+                    <li>To sync your YouTube Music history to your Last.fm account</li>
+                    <li>To enforce rate limits and protect against abuse</li>
                 </ul>
-            </li>
-            <li><b>Data Storage:</b> All user data is stored securely in Supabase (PostgreSQL). Credentials are never shared or sold. No cookies are used for tracking; Flask sessions are used for login state only.</li>
-            <li><b>Third Parties:</b> No analytics or ad networks are used. Vercel Insights may collect basic serverless usage data for operational monitoring only.</li>
-            <li><b>Data Deletion:</b> You may request deletion of your account and all associated data at any time by contacting the maintainer.</li>
-            <li><b>Security:</b> We use HTTPS, secure storage, and security headers. However, no system is perfectly secure.</li>
-            <li><b>Policy Updates:</b> This policy may be updated. Continued use after changes constitutes acceptance.</li>
-            <li><b>Contact:</b> For privacy questions or data deletion, contact <a href='https://kuberbassi.com' target='_blank'>kuberbassi.com</a>.</li>
-        </ol>
-        <a href="/" class="back-btn">← Back to Home</a>
-        </body></html>
-        """)
+                <div class="highlight-box">
+                    <strong>Your credentials are never shared or sold.</strong> They are stored per-user in Supabase and are not accessible to the service operator except as required for the service to function.
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">3. Data Storage & Security</h2>
+            <div class="section-content">
+                <p>All user data is stored securely in Supabase (PostgreSQL). We use HTTPS, secure storage, and security headers. No cookies are used for tracking; Flask sessions are used for login state only.</p>
+                <p>No analytics or ad networks are used. Vercel Insights may collect basic serverless usage data for operational monitoring only.</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">4. Data Deletion</h2>
+            <div class="section-content">
+                <p>You may request deletion of your account and all associated data at any time by contacting us at <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">5. Policy Updates</h2>
+            <div class="section-content">
+                <p>This policy may be updated. Continued use after changes constitutes acceptance. For privacy questions, contact us at <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
+            </div>
+        </div>
+    '''
+    return render_template_string(LEGAL_PAGE_TEMPLATE.format(
+        title="Privacy Policy",
+        meta_description="Privacy Policy for YT Music Scrobbler - learn how we handle your data",
+        path="/privacy",
+        content=content
+    ))
 
 
 @app.route('/api/health')
