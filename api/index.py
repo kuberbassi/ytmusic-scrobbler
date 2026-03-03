@@ -164,9 +164,7 @@ def add_security_headers(response):
 # CORE SCROBBLE LOGIC (Shared between single and multi-user)
 # =============================================================================
 
-
 # Common YT Music title suffixes that Last.fm (or other scrobblers) typically strip.
-# Order matters: longer/more-specific patterns first.
 _TITLE_VARIANT_RE = re.compile(
     r'\s*[\(\[]\s*(?:'
     r'official\s+(?:video|audio|music\s*video|mv|lyric\s*video)|'
@@ -187,17 +185,19 @@ _TITLE_VARIANT_RE = re.compile(
     re.IGNORECASE
 )
 
+# Separators used in multi-artist strings from YT Music
+_ARTIST_SPLIT_RE = re.compile(r'\s*(?:,|&|\bx\b|\band\b)\s*', re.IGNORECASE)
+
 
 def strip_title_variants(title: str) -> str:
     """
     Strip common YT Music parenthetical/bracketed suffixes to get the base title.
     e.g. "Song (2024 Remastered Version)" → "Song"
          "Song [Mike Geno Remix]" → "Song"
-         "Song (Official Video)" → "Song"
     Iterates until stable so nested variants are also handled.
     """
     t = title.strip()
-    for _ in range(5):  # max 5 passes for nested brackets
+    for _ in range(5):
         stripped = _TITLE_VARIANT_RE.sub('', t).strip()
         if stripped == t:
             break
@@ -205,18 +205,28 @@ def strip_title_variants(title: str) -> str:
     return t
 
 
+def extract_primary_artist(artist: str) -> str:
+    """
+    Extract the primary (first) artist from a multi-artist string.
+    YT Music: "40K, Sharn, The Paul, and Bohemia" → "40K"
+    Last.fm stores only the primary artist, so we need the same reduction
+    on both sides to produce matching UIDs.
+    """
+    if not artist:
+        return artist
+    parts = _ARTIST_SPLIT_RE.split(artist.strip())
+    return parts[0].strip() if parts else artist.strip()
+
+
 def normalize_string(s: str) -> str:
     """Normalize a string for consistent comparison"""
     if not s:
         return ""
     s = s.lower().strip()
-    # Remove featuring variations
     for feat in [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ']:
         if feat in s:
             s = s.split(feat)[0].strip()
-    # Remove special characters but keep alphanumeric and spaces
     s = ''.join(c for c in s if c.isalnum() or c == ' ')
-    # Collapse multiple spaces
     s = ' '.join(s.split())
     return s
 
@@ -224,35 +234,41 @@ def normalize_string(s: str) -> str:
 def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
     """
     Generate multiple UIDs for a track for comprehensive deduplication.
-    Checks are tried in order — ANY match means already scrobbled.
+    Produces UIDs with both the full artist string AND the primary artist
+    alone, so YT Music multi-artist strings match Last.fm single-artist entries.
+    ANY match → already scrobbled.
     """
     uids = []
 
-    # 1. Video ID — most precise, always wins
+    # 1. Video ID — most precise
     if video_id:
         uids.append(f"vid:{video_id}")
 
-    # 2. Exact title + artist (as-is from API)
-    if title and artist:
-        uids.append(f"{title}_{artist}")
+    primary_artist = extract_primary_artist(artist)
+    clean_title = strip_title_variants(title)
 
-    # 3. Normalized exact title (feat. stripped, alphanumeric only)
-    norm_title = normalize_string(title)
-    norm_artist = normalize_string(artist)
-    if norm_title and norm_artist:
-        uids.append(f"norm:{norm_title}_{norm_artist}")
+    def _add_variants(t, a):
+        """Add exact + normalized UIDs for a (title, artist) pair."""
+        if t and a:
+            uids.append(f"{t}_{a}")
+        norm_t = normalize_string(t)
+        norm_a = normalize_string(a)
+        if norm_t and norm_a and f"norm:{norm_t}_{norm_a}" not in uids:
+            uids.append(f"norm:{norm_t}_{norm_a}")
 
-    # 4. Clean title variants — strip YT-specific suffixes like
-    #    "(Official Video)", "(2024 Remastered)", "[Mike Geno Remix]" etc.
-    #    Covers cases where we scrobbled the raw YT title but Last.fm (or
-    #    another scrobbler) logged the clean title, and vice versa.
-    clean = strip_title_variants(title)
-    if clean and clean.lower() != title.lower():
-        if artist:
-            uids.append(f"{clean}_{artist}")
-        norm_clean = normalize_string(clean)
-        if norm_clean and norm_artist and norm_clean != norm_title:
-            uids.append(f"norm:{norm_clean}_{norm_artist}")
+    # 2. Full artist string (as returned by API)
+    _add_variants(title, artist)
+
+    # 3. Primary artist only — critical for YT multi-artist vs Last.fm single-artist
+    if primary_artist and primary_artist.lower() != artist.lower():
+        _add_variants(title, primary_artist)
+
+    # 4. Clean title (YT suffix stripped) + full artist
+    if clean_title and clean_title.lower() != title.lower():
+        _add_variants(clean_title, artist)
+        # 5. Clean title + primary artist (widest net)
+        if primary_artist and primary_artist.lower() != artist.lower():
+            _add_variants(clean_title, primary_artist)
 
     return uids
 
@@ -2188,17 +2204,27 @@ def history():
         if network:
             try:
                 authenticated_user = network.get_authenticated_user()
-                # Fetch 1000 recent scrobbles (20 pages × 50) to cover
-                # a wide historical window without loading the whole account.
-                recent_lfm = network.get_user(authenticated_user).get_recent_tracks(limit=1000)
-                for r in recent_lfm:
+                lfm_user = network.get_user(authenticated_user)
+                # Paginate manually: Last.fm API max is 200/page.
+                # Fetch up to 10 pages (2000 tracks) for solid historical coverage.
+                for page in range(1, 11):
                     try:
-                        # generate_track_uids produces both exact AND clean-title
-                        # variants so "Song (Official Video)" matches "Song" etc.
-                        for uid in generate_track_uids(r.track.title, r.track.artist.name):
-                            all_scrobbled_uids.add(uid)
+                        page_tracks = lfm_user.get_recent_tracks(limit=200, page=page)
+                        if not page_tracks:
+                            break
+                        for r in page_tracks:
+                            try:
+                                # generate_track_uids on BOTH sides uses the same
+                                # primary-artist extraction, so multi-artist YT strings
+                                # match Last.fm single-artist entries.
+                                for uid in generate_track_uids(r.track.title, r.track.artist.name):
+                                    all_scrobbled_uids.add(uid)
+                            except Exception:
+                                pass
+                        if len(page_tracks) < 200:
+                            break  # last page
                     except Exception:
-                        pass  # skip malformed entries
+                        break  # stop pagination on error
             except Exception as lfm_err:
                 print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), using DB only")
 
