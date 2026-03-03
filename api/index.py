@@ -150,11 +150,11 @@ def add_security_headers(response):
     if response.content_type and 'text/html' in response.content_type:
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://accounts.google.com; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
             "img-src 'self' data: https: blob:; "
-            "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com; "
+            "connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://vitals.vercel-insights.com; "
             "frame-ancestors 'none';"
         )
     return response
@@ -1214,8 +1214,14 @@ HTML_TEMPLATE = '''
             localStorage.removeItem('yt_headers');
             localStorage.removeItem('ytmusic');
             
-            // Sync with Server
-            await saveConfigToServer();
+            // Explicitly clear ytmusic from the server DB
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ytmusic: {headers: null}})
+                });
+            } catch (e) { console.error("Failed to clear YT config on server", e); }
             
             toast('Disconnected from YouTube', 'info');
             log('Disconnected');
@@ -1333,11 +1339,12 @@ HTML_TEMPLATE = '''
                 const data = await res.json();
                 if (data.error) return list.innerHTML = `<div class="empty">${data.error}</div>`;
                 if (!data.tracks?.length) return list.innerHTML = '<div class="empty">No history</div>';
+                const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
                 list.innerHTML = data.tracks.map(t => `
-                    <div class="track" data-video-id="${t.videoId}">
+                    <div class="track" data-video-id="${esc(t.videoId)}">
                         <div class="track-info">
-                            <h4>${t.title}</h4>
-                            <p>${t.artist}</p>
+                            <h4>${esc(t.title)}</h4>
+                            <p>${esc(t.artist)}</p>
                         </div>
                         ${t.scrobbled ? '<span class="track-badge done">Scrobbled</span>' : ''}
                     </div>
@@ -1375,7 +1382,9 @@ HTML_TEMPLATE = '''
             
             const config = {
                 lastfm: lastfm,
-                ytmusic: { headers: yt_headers },
+                // Only include ytmusic if headers are actually set — avoids
+                // overwriting valid DB config with null on a fresh browser.
+                ...(yt_headers ? {ytmusic: {headers: yt_headers}} : {}),
                 auto_scrobble: auto_scrobble,
                 interval: 300  // Fixed 5 min (server cron)
             };
@@ -1405,6 +1414,8 @@ HTML_TEMPLATE = '''
                 
                 if (config.ytmusic?.headers) {
                     localStorage.setItem('yt_headers', config.ytmusic.headers);
+                    // Also set 'ytmusic' key so getConfig() reads it correctly on reload
+                    localStorage.setItem('ytmusic', JSON.stringify({headers: config.ytmusic.headers}));
                     document.getElementById('yt-headers').value = config.ytmusic.headers;
                 }
                 
@@ -1509,6 +1520,33 @@ HTML_TEMPLATE = '''
 '''
 
 # Scrobble tracking handled by persistent scrobbled.json
+
+
+def _enrich_config_from_db(config: dict, user_id) -> dict:
+    """
+    If the client-supplied config is missing Last.fm or YT Music credentials,
+    fall back to the credentials stored in the user's DB profile.
+    This handles the case where localStorage is stale/cleared but the user
+    is still logged-in via Google OAuth and has saved credentials in the DB.
+    """
+    if not user_id:
+        return config
+    needs_lastfm = not config.get('lastfm', {}).get('api_key')
+    needs_ytmusic = not config.get('ytmusic', {}).get('headers')
+    if not needs_lastfm and not needs_ytmusic:
+        return config  # Nothing to fill in
+    try:
+        store = UserDataStore(user_id=user_id)
+        db_cfg = store.get_config()
+        merged = dict(config)
+        if needs_lastfm and db_cfg.get('lastfm', {}).get('api_key'):
+            merged['lastfm'] = db_cfg['lastfm']
+        if needs_ytmusic and db_cfg.get('ytmusic', {}).get('headers'):
+            merged['ytmusic'] = db_cfg['ytmusic']
+        return merged
+    except Exception as e:
+        print(f"[WARN] _enrich_config_from_db failed: {e}")
+        return config
 
 
 def get_lastfm_network(config):
@@ -2105,7 +2143,11 @@ def get_current_user():
 @app.route('/api/status', methods=['POST'])
 def status():
     config = request.json or {}
-    
+
+    # Fill in missing credentials from DB (handles stale localStorage)
+    user_id = session.get('user_id')
+    config = _enrich_config_from_db(config, user_id)
+
     # Check Last.fm
     network, _ = get_lastfm_network(config)
     username = None
@@ -2193,20 +2235,22 @@ def history():
                 config = {**config, 'lastfm': db_cfg['lastfm']}
 
         # ------------------------------------------------------------------
-        # Build the ground-truth scrobbled set.
-        # Last.fm is THE source of truth — it covers tracks scrobbled by
-        # any device/client/app at any time. DB is kept as a fast supplement
-        # (vid: lookup, and fallback when Last.fm call fails).
+        # Build the ground-truth scrobbled set from Last.fm ONLY.
+        # The DB is intentionally NOT seeded here — it may contain stale/ghost
+        # entries from past bugs (tracks saved to DB but rejected by Last.fm,
+        # or from the old infinite-loop). Seeding from DB causes false-positive
+        # "Scrobbled" badges on tracks that are NOT actually on Last.fm.
+        # DB is used as fallback ONLY when the Last.fm API call fails entirely.
         # ------------------------------------------------------------------
-        all_scrobbled_uids: set = set(db_scrobbled)  # start with DB entries
+        all_scrobbled_uids: set = set()  # EMPTY — only Last.fm fills this
+        lfm_fetch_succeeded = False
 
         network, _ = get_lastfm_network(config)
         if network:
             try:
                 authenticated_user = network.get_authenticated_user()
                 lfm_user = network.get_user(authenticated_user)
-                # Paginate manually: Last.fm API max is 200/page.
-                # Fetch up to 10 pages (2000 tracks) for solid historical coverage.
+                # Paginate: Last.fm API max is 200/page. 10 pages = 2000 tracks.
                 for page in range(1, 11):
                     try:
                         page_tracks = lfm_user.get_recent_tracks(limit=200, page=page)
@@ -2214,19 +2258,23 @@ def history():
                             break
                         for r in page_tracks:
                             try:
-                                # generate_track_uids on BOTH sides uses the same
-                                # primary-artist extraction, so multi-artist YT strings
-                                # match Last.fm single-artist entries.
                                 for uid in generate_track_uids(r.track.title, r.track.artist.name):
                                     all_scrobbled_uids.add(uid)
                             except Exception:
                                 pass
                         if len(page_tracks) < 200:
-                            break  # last page
+                            break  # reached last page
                     except Exception:
-                        break  # stop pagination on error
+                        break
+                lfm_fetch_succeeded = True
+                print(f"[INFO] history: loaded {len(all_scrobbled_uids)} UIDs from Last.fm")
             except Exception as lfm_err:
-                print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), using DB only")
+                print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), falling back to DB")
+
+        if not lfm_fetch_succeeded:
+            # Last.fm completely unreachable — fall back to DB so badges still
+            # show something rather than everything being blank.
+            all_scrobbled_uids = set(db_scrobbled)
 
         yt_history = ytmusic.get_history()
 
@@ -2261,7 +2309,14 @@ def scrobble():
     # Require login in production multi-user mode
     if is_multi_user_enabled() and not session.get('logged_in'):
         return jsonify({'success': False, 'error': 'Not logged in'}), 401
-    
+
+    # Resolve user identity early so we can fall back to DB credentials when
+    # the client's localStorage is stale or empty (e.g. after clearing storage).
+    user_id = session.get('user_id')
+    google_user = session.get('google_user', {})
+    username = google_user.get('email', 'unknown')
+    config = _enrich_config_from_db(config, user_id)
+
     # Prevent overlapping sync operations
     if not sync_operation_lock.acquire(blocking=False):
         return jsonify({'success': False, 'error': 'Sync already in progress'})
@@ -2274,11 +2329,6 @@ def scrobble():
         ytmusic, ytmusic_error = get_ytmusic_client(config)
         if not ytmusic:
             return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
-        
-        # Get user_id from session (Google OAuth) instead of Last.fm
-        user_id = session.get('user_id')
-        google_user = session.get('google_user', {})
-        username = google_user.get('email', 'unknown')
 
         # DISTRIBUTED SYNC LOCK: Update last_sync_at NOW (before any work) so other
         # concurrent Vercel instances see this user as "busy" and skip them.
@@ -2694,8 +2744,21 @@ def handle_config():
         return jsonify({'error': 'Not logged in'}), 401
     
     if request.method == 'POST':
-        new_config = request.json
-        ConfigManager.save(new_config, user_id=user_id)
+        new_config = request.json or {}
+        # Merge with existing config so that a save from one device/browser
+        # (which may not have all credentials in localStorage) does NOT erase
+        # credentials saved by another device.
+        existing = ConfigManager.load(user_id=user_id) or {}
+        merged_config = {**existing, **new_config}
+        # Deep-merge nested dicts (lastfm, ytmusic):
+        # - If key is NOT in new_config → keep existing (client has no opinion)
+        # - If key IS in new_config → use new values (even nulls clear the field)
+        for key in ('lastfm', 'ytmusic'):
+            if key in new_config and key in existing and isinstance(new_config[key], dict) and isinstance(existing[key], dict):
+                merged_sub = dict(existing[key])
+                merged_sub.update(new_config[key])  # explicit nulls overwrite (allows clearing)
+                merged_config[key] = merged_sub
+        ConfigManager.save(merged_config, user_id=user_id)
         return jsonify({'success': True})
     
     return jsonify(ConfigManager.load(user_id=user_id))
