@@ -55,7 +55,26 @@ def add_sync_log(artist, title, status="Synced", user=None):
     sync_logs = sync_logs[:50]  # Keep last 50 for multi-user
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+
+# Build a STABLE secret key so sessions survive serverless cold starts.
+# If SECRET_KEY env var isn't set, derive a deterministic key from other
+# stable secrets so users don't get logged out every deployment/cold start.
+_secret_key = os.environ.get('SECRET_KEY', '')
+if not _secret_key:
+    _key_source = os.environ.get('GOOGLE_CLIENT_SECRET', '') + os.environ.get('SUPABASE_KEY', '')
+    if _key_source.strip():
+        _secret_key = hashlib.sha256(f'ytscrobbler-session:{_key_source}'.encode()).hexdigest()
+    else:
+        # Local dev only fallback — set SECRET_KEY in production!
+        _secret_key = 'dev-only-insecure-key-set-SECRET_KEY-in-production'
+        print('[WARN] SECRET_KEY not set and no stable env vars found. Sessions will NOT persist across restarts.')
+app.secret_key = _secret_key
+
+# Session cookie hardening — keeps users logged in across visits
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = bool(os.environ.get('SECRET_KEY'))  # Secure in prod, not in local http
+app.config['PERMANENT_SESSION_LIFETIME'] = 30 * 24 * 60 * 60  # 30 days
 
 # =============================================================================
 # SECURITY & RATE LIMITING
@@ -1970,6 +1989,8 @@ def google_callback():
             return redirect('/?error=user_creation_failed')
         
         # Store both Google info and database user_id in session
+        # Mark permanent so cookie survives browser close (up to PERMANENT_SESSION_LIFETIME)
+        session.permanent = True
         session['google_user'] = google_user
         session['user_id'] = db_user.get('id')  # Database UUID
         session['logged_in'] = True
@@ -2131,7 +2152,14 @@ def scrobble():
         user_id = session.get('user_id')
         google_user = session.get('google_user', {})
         username = google_user.get('email', 'unknown')
-        
+
+        # DISTRIBUTED SYNC LOCK: Update last_sync_at NOW (before any work) so other
+        # concurrent Vercel instances see this user as "busy" and skip them.
+        # get_all_active_users() filters users synced in the last 4 min, so this
+        # acts as a cross-instance mutex without needing Redis or a real lock.
+        if user_id:
+            update_user_last_sync(user_id)
+
         # Create data store (uses DB if multi-user, else file)
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
         data_store.clear_session()
@@ -2139,8 +2167,9 @@ def scrobble():
         # Load scrobble history
         scrobbled_tracks, track_meta_map = data_store.get_scrobble_history()
         
-        # Sync with Last.fm to avoid duplicates (marks recent Last.fm tracks as already scrobbled)
-        # This runs every time to catch any tracks scrobbled from other sources
+        # Sync with Last.fm to mark tracks already scrobbled from other sources.
+        # IMPORTANT: Directly update track_meta_map[uid] after every save so the
+        # local map never goes stale even when the DB call returns an empty set.
         try:
             authenticated_user = network.get_authenticated_user()
             recent = network.get_user(authenticated_user).get_recent_tracks(limit=50)
@@ -2154,19 +2183,27 @@ def scrobble():
                 if already_scrobbled:
                     continue
                 
+                # Preserve the real Last.fm timestamp when available
+                try:
+                    lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
+                except (TypeError, ValueError):
+                    lfm_ts = int(time.time())
+
                 meta = {
-                    'timestamp': int(time.time()) - 3600,  # Mark as 1 hour ago
+                    'timestamp': lfm_ts,
                     'track_title': r.track.title,
                     'artist': r.track.artist.name
                 }
-                # Save ALL UIDs to storage for comprehensive deduplication
+                # Save ALL UIDs and immediately update local map so it stays
+                # accurate even if the DB call fails and returns set(), {}
                 for uid in track_uids:
-                    scrobbled_tracks, track_meta_map = data_store.save_scrobble(uid, meta)
+                    data_store.save_scrobble(uid, meta)
+                    track_meta_map[uid] = meta  # Always update locally
                 lastfm_synced_count += 1
             if lastfm_synced_count > 0:
                 print(f"[INFO] Synced {lastfm_synced_count} tracks from Last.fm history")
         except Exception as e:
-            print(f"[WARN] Last.fm sync check failed: {e}")
+            print(f"[WARN] Last.fm sync check failed: {e} — relying on DB-only deduplication")
 
         history = ytmusic.get_history()
         if not history:
@@ -2207,14 +2244,18 @@ def scrobble():
                         timestamp=timestamp,
                         album=album if album else None
                     )
-                    # Save ALL UIDs to prevent any future duplicates
                     scrobble_meta = {
                         'timestamp': timestamp,
                         'track_title': title,
                         'artist': artist
                     }
+                    # Save to DB AND immediately update local map.
+                    # Updating track_meta_map directly here is critical:
+                    # save_scrobble() returns set(),{} on DB failure, which
+                    # would wipe out the map and cause a scrobble loop.
                     for uid in track_uids:
-                        scrobbled_tracks, track_meta_map = data_store.save_scrobble(uid, scrobble_meta)
+                        data_store.save_scrobble(uid, scrobble_meta)
+                        track_meta_map[uid] = scrobble_meta  # Always stays accurate
                     add_sync_log(artist, title, user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
@@ -2285,6 +2326,12 @@ class BackgroundScrobbler:
         """Perform sync for a single user. Used by both local and cron."""
         global last_sync_time
         last_sync_time = int(time.time())
+
+        # DISTRIBUTED SYNC LOCK: claim this user's sync slot immediately.
+        # Cron workers on separate instances check last_sync_at before picking a user;
+        # updating it now prevents two instances from syncing the same user at once.
+        if user_id:
+            update_user_last_sync(user_id)
         
         network, net_err = get_lastfm_network(config)
         ytmusic, yt_err = get_ytmusic_client(config)
@@ -2313,8 +2360,8 @@ class BackgroundScrobbler:
         current_time = int(time.time())
         scrobbled_count = 0
         
-        # Background sync: ONLY check first 3 items
-        for i, item in enumerate(history[:3]):
+        # Process the 10 most recent items (was 3 — too narrow a window)
+        for i, item in enumerate(history[:10]):
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
             artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
@@ -2338,22 +2385,26 @@ class BackgroundScrobbler:
 
             try:
                 with scrobble_lock:
-                    # Use different timestamps for each track to avoid Last.fm deduplication
-                    timestamp = current_time - (i * 60)  # 1 minute apart
+                    # Space timestamps 1 minute apart so Last.fm doesn't deduplicate them
+                    timestamp = current_time - (i * 60)
                     network.scrobble(
                         artist=artist,
                         title=title,
                         timestamp=timestamp,
                         album=album if album else None
                     )
-                    # Save ALL UIDs to prevent duplicates
                     scrobble_meta = {
                         'timestamp': timestamp,
                         'track_title': title,
                         'artist': artist
                     }
+                    # Save to DB AND immediately update local meta_map.
+                    # Direct map update is critical: save_scrobble() returns set(),{}
+                    # on DB failure, which would zero out meta_map and cause a
+                    # scrobble loop on every subsequent cron tick.
                     for uid in track_uids:
-                        history_set, meta_map = data_store.save_scrobble(uid, scrobble_meta)
+                        data_store.save_scrobble(uid, scrobble_meta)
+                        meta_map[uid] = scrobble_meta  # Always stays accurate
                     add_sync_log(artist, title, status="Auto", user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
