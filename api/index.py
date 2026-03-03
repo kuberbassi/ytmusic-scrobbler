@@ -165,11 +165,50 @@ def add_security_headers(response):
 # =============================================================================
 
 
+# Common YT Music title suffixes that Last.fm (or other scrobblers) typically strip.
+# Order matters: longer/more-specific patterns first.
+_TITLE_VARIANT_RE = re.compile(
+    r'\s*[\(\[]\s*(?:'
+    r'official\s+(?:video|audio|music\s*video|mv|lyric\s*video)|'
+    r'lyric\s*(?:video|s)?|'
+    r'\d{4}\s*remaster(?:ed)?(?:\s*version)?|'
+    r'remaster(?:ed)?(?:\s*\d{4})?(?:\s*version)?|'
+    r'instrumental(?:\s*version)?|'
+    r'live(?:\s+(?:version|at\s+.{0,30}))?|'
+    r'(?:[\w\s&]+\s+)?remix|'
+    r'(?:[\w\s&]+\s+)?edit|'
+    r'extended(?:\s+(?:version|mix))?|'
+    r'radio\s+edit|'
+    r'acoustic(?:\s*version)?|'
+    r'explicit|clean(?:\s+version)?|'
+    r'visualizer|'
+    r'vevo|hd|4k|hq'
+    r')\s*[\)\]]',
+    re.IGNORECASE
+)
+
+
+def strip_title_variants(title: str) -> str:
+    """
+    Strip common YT Music parenthetical/bracketed suffixes to get the base title.
+    e.g. "Song (2024 Remastered Version)" → "Song"
+         "Song [Mike Geno Remix]" → "Song"
+         "Song (Official Video)" → "Song"
+    Iterates until stable so nested variants are also handled.
+    """
+    t = title.strip()
+    for _ in range(5):  # max 5 passes for nested brackets
+        stripped = _TITLE_VARIANT_RE.sub('', t).strip()
+        if stripped == t:
+            break
+        t = stripped
+    return t
+
+
 def normalize_string(s: str) -> str:
     """Normalize a string for consistent comparison"""
     if not s:
         return ""
-    # Lowercase, strip whitespace, remove common variations
     s = s.lower().strip()
     # Remove featuring variations
     for feat in [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ']:
@@ -185,24 +224,36 @@ def normalize_string(s: str) -> str:
 def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
     """
     Generate multiple UIDs for a track for comprehensive deduplication.
-    Returns list of UIDs to check - if ANY match, track is considered already scrobbled.
+    Checks are tried in order — ANY match means already scrobbled.
     """
     uids = []
-    
-    # Primary: Video ID (most unique)
+
+    # 1. Video ID — most precise, always wins
     if video_id:
         uids.append(f"vid:{video_id}")
-    
-    # Secondary: Title + Artist (exact)
+
+    # 2. Exact title + artist (as-is from API)
     if title and artist:
         uids.append(f"{title}_{artist}")
-    
-    # Tertiary: Normalized title + artist (catches slight variations)
+
+    # 3. Normalized exact title (feat. stripped, alphanumeric only)
     norm_title = normalize_string(title)
     norm_artist = normalize_string(artist)
     if norm_title and norm_artist:
         uids.append(f"norm:{norm_title}_{norm_artist}")
-    
+
+    # 4. Clean title variants — strip YT-specific suffixes like
+    #    "(Official Video)", "(2024 Remastered)", "[Mike Geno Remix]" etc.
+    #    Covers cases where we scrobbled the raw YT title but Last.fm (or
+    #    another scrobbler) logged the clean title, and vice versa.
+    clean = strip_title_variants(title)
+    if clean and clean.lower() != title.lower():
+        if artist:
+            uids.append(f"{clean}_{artist}")
+        norm_clean = normalize_string(clean)
+        if norm_clean and norm_artist and norm_clean != norm_title:
+            uids.append(f"norm:{norm_clean}_{norm_artist}")
+
     return uids
 
 
@@ -1232,7 +1283,20 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     toast(`Scrobbled ${data.count} tracks`);
                     log(`Scrobbled ${data.count}`);
-                    loadHistory(); // Auto-refresh history to show newly scrobbled tracks
+                    // Instant badge update: mark tracks right now without
+                    // waiting for loadHistory() round-trip
+                    if (data.scrobbled_video_ids?.length) {
+                        const justScrobbled = new Set(data.scrobbled_video_ids);
+                        document.querySelectorAll('#history-list .track').forEach(el => {
+                            if (justScrobbled.has(el.dataset.videoId) &&
+                                !el.querySelector('.track-badge.done')) {
+                                el.insertAdjacentHTML('beforeend',
+                                    '<span class="track-badge done">Scrobbled</span>');
+                            }
+                        });
+                    }
+                    // Full refresh afterwards for accurate state
+                    loadHistory();
                 } else {
                     toast(data.error || 'Failed', 'error');
                     log('Error: ' + (data.error || 'Failed'));
@@ -1254,7 +1318,7 @@ HTML_TEMPLATE = '''
                 if (data.error) return list.innerHTML = `<div class="empty">${data.error}</div>`;
                 if (!data.tracks?.length) return list.innerHTML = '<div class="empty">No history</div>';
                 list.innerHTML = data.tracks.map(t => `
-                    <div class="track">
+                    <div class="track" data-video-id="${t.videoId}">
                         <div class="track-info">
                             <h4>${t.title}</h4>
                             <p>${t.artist}</p>
@@ -2102,34 +2166,51 @@ def history():
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
         db_scrobbled, _ = data_store.get_scrobble_history()
 
-        # ----------------------------------------------------------------
-        # Build the ground-truth scrobbled set from Last.fm.
-        # Last.fm is THE source of truth — it covers tracks scrobbled
-        # historically, by other clients, or before this app was installed.
-        # We combine it with our DB so old/legacy entries are also caught.
-        # ----------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Ensure we have Last.fm credentials.
+        # Client sends them from localStorage, but if that's stale/empty,
+        # fall back to the user's stored credentials in the DB.
+        # ------------------------------------------------------------------
+        if not config.get('lastfm', {}).get('api_key') and user_id:
+            db_cfg = data_store.get_config()
+            if db_cfg.get('lastfm', {}).get('api_key'):
+                config = {**config, 'lastfm': db_cfg['lastfm']}
+
+        # ------------------------------------------------------------------
+        # Build the ground-truth scrobbled set.
+        # Last.fm is THE source of truth — it covers tracks scrobbled by
+        # any device/client/app at any time. DB is kept as a fast supplement
+        # (vid: lookup, and fallback when Last.fm call fails).
+        # ------------------------------------------------------------------
         all_scrobbled_uids: set = set(db_scrobbled)  # start with DB entries
 
         network, _ = get_lastfm_network(config)
         if network:
             try:
                 authenticated_user = network.get_authenticated_user()
-                recent_lfm = network.get_user(authenticated_user).get_recent_tracks(limit=200)
+                # Fetch 1000 recent scrobbles (20 pages × 50) to cover
+                # a wide historical window without loading the whole account.
+                recent_lfm = network.get_user(authenticated_user).get_recent_tracks(limit=1000)
                 for r in recent_lfm:
-                    for uid in generate_track_uids(r.track.title, r.track.artist.name):
-                        all_scrobbled_uids.add(uid)
+                    try:
+                        # generate_track_uids produces both exact AND clean-title
+                        # variants so "Song (Official Video)" matches "Song" etc.
+                        for uid in generate_track_uids(r.track.title, r.track.artist.name):
+                            all_scrobbled_uids.add(uid)
+                    except Exception:
+                        pass  # skip malformed entries
             except Exception as lfm_err:
-                print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), falling back to DB only")
+                print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), using DB only")
 
         yt_history = ytmusic.get_history()
-        
+
         tracks = []
-        for item in yt_history[:20]:
+        for item in yt_history[:30]:  # show 30 tracks (was 20)
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
             video_id = item.get('videoId')
-            # generate_track_uids produces the same UIDs the scrobble engine
-            # uses: ["vid:{id}", "{title}_{artist}", "norm:{normalized}"]
+            # generate_track_uids now returns vid:, exact, norm:, AND clean
+            # title variants — so mismatches due to "(Remix)" etc. are caught
             track_uids = generate_track_uids(title, artist, video_id)
             is_scrobbled = any(uid in all_scrobbled_uids for uid in track_uids)
 
@@ -2140,7 +2221,7 @@ def history():
                 'videoId': video_id or 'no-id',
                 'scrobbled': is_scrobbled
             })
-        
+
         return jsonify({'tracks': tracks})
     except Exception as e:
         return jsonify({'error': str(e)})
@@ -2231,10 +2312,11 @@ def scrobble():
             return jsonify({'success': True, 'count': 0, 'message': 'No history found'})
         
         scrobbled_count = 0
+        scrobbled_video_ids = []  # Returned to frontend for instant badge update
         current_time = int(time.time())
-        
-        # Process history - limit to 20 for manual sync
-        for i, item in enumerate(history[:20]):
+
+        # Process history - limit to 30 for manual sync (was 20)
+        for i, item in enumerate(history[:30]):
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
             artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
@@ -2277,6 +2359,8 @@ def scrobble():
                     for uid in track_uids:
                         data_store.save_scrobble(uid, scrobble_meta)
                         track_meta_map[uid] = scrobble_meta  # Always stays accurate
+                    if video_id:
+                        scrobbled_video_ids.append(video_id)  # For instant frontend badge
                     add_sync_log(artist, title, user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
@@ -2285,17 +2369,17 @@ def scrobble():
             except Exception as e:
                 print(f"[ERROR] Scrobble failed for '{title}': {e}")
                 add_sync_log(artist, title, status=f"Err: {str(e)[:20]}", user=username)
-        
+
         status_msg = f"Scrobbled {scrobbled_count}" if scrobbled_count > 0 else "No new tracks"
         add_sync_log("System", status_msg, status="Done", user=username)
         global last_sync_time
         last_sync_time = int(time.time())
-        
+
         # Update last_sync_at in DB to prevent cron from double-syncing
         if user_id:
             update_user_last_sync(user_id)
-        
-        return jsonify({'success': True, 'count': scrobbled_count})
+
+        return jsonify({'success': True, 'count': scrobbled_count, 'scrobbled_video_ids': scrobbled_video_ids})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2381,8 +2465,8 @@ class BackgroundScrobbler:
         current_time = int(time.time())
         scrobbled_count = 0
         
-        # Process the 10 most recent items (was 3 — too narrow a window)
-        for i, item in enumerate(history[:10]):
+        # Process the 15 most recent items (was 3, then 10)
+        for i, item in enumerate(history[:15]):
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
             artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
