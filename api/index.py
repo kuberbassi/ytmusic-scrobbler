@@ -1292,9 +1292,12 @@ HTML_TEMPLATE = '''
             }
         });
 
-        // Scrobble
+        // Scrobble — one-by-one badge animation
         async function scrobbleNow() {
-            log('Scrobbling...');
+            const btn = document.querySelector('button[onclick="scrobbleNow()"]');
+            const list = document.getElementById('history-list');
+            if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+            log('Syncing…');
             try {
                 const res = await fetch('/api/scrobble', {
                     method: 'POST',
@@ -1303,27 +1306,37 @@ HTML_TEMPLATE = '''
                 });
                 const data = await res.json();
                 if (data.success) {
-                    toast(`Scrobbled ${data.count} tracks`);
-                    log(`Scrobbled ${data.count}`);
-                    // Instant badge update: mark tracks right now without
-                    // waiting for loadHistory() round-trip
-                    if (data.scrobbled_video_ids?.length) {
-                        const justScrobbled = new Set(data.scrobbled_video_ids);
-                        document.querySelectorAll('#history-list .track').forEach(el => {
-                            if (justScrobbled.has(el.dataset.videoId) &&
-                                !el.querySelector('.track-badge.done')) {
-                                el.insertAdjacentHTML('beforeend',
-                                    '<span class="track-badge done">Scrobbled</span>');
+                    if (data.count === 0) {
+                        toast('Nothing new to scrobble');
+                        log('Already up to date');
+                    } else {
+                        toast(`Scrobbled ${data.count} track${data.count !== 1 ? 's' : ''}`);
+                        log(`Done — ${data.count} scrobbled`);
+                        // Animate badges appearing one by one for each newly scrobbled track
+                        for (const vid of (data.scrobbled_video_ids || [])) {
+                            const el = list.querySelector(`.track[data-video-id="${vid}"]`);
+                            if (el && !el.querySelector('.track-badge.done')) {
+                                const badge = document.createElement('span');
+                                badge.className = 'track-badge done';
+                                badge.textContent = 'Scrobbled';
+                                badge.style.cssText = 'opacity:0;transition:opacity 0.35s ease';
+                                el.appendChild(badge);
+                                // Trigger fade-in on next frame
+                                requestAnimationFrame(() => requestAnimationFrame(() => { badge.style.opacity = '1'; }));
+                                await new Promise(r => setTimeout(r, 280));
                             }
-                        });
+                        }
                     }
-                    // Full refresh afterwards for accurate state
+                    // Refresh so DB state is reflected accurately
                     loadHistory();
                 } else {
                     toast(data.error || 'Failed', 'error');
                     log('Error: ' + (data.error || 'Failed'));
                 }
             } catch (e) { toast('Error', 'error'); log('Error'); }
+            finally {
+                if (btn) { btn.disabled = false; btn.textContent = 'Scrobble Now'; }
+            }
         }
 
         // History
@@ -2206,88 +2219,36 @@ def status():
 @app.route('/api/history', methods=['POST'])
 def history():
     config = request.json or {}
-    
-    # Require login in production multi-user mode
+
     if is_multi_user_enabled() and not session.get('logged_in'):
         return jsonify({'error': 'Not logged in'}), 401
-    
+
+    # Fill missing credentials from DB (handles stale localStorage)
+    user_id = session.get('user_id')
+    config = _enrich_config_from_db(config, user_id)
+
     ytmusic, error = get_ytmusic_client(config)
     if not ytmusic:
         return jsonify({'error': error or 'Not configured'})
-    
+
     try:
-        # Get user_id from session (Google OAuth) instead of Last.fm
-        user_id = session.get('user_id')
         google_user = session.get('google_user', {})
         username = google_user.get('email', 'unknown')
-        
+
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+        # DB is the source of truth — entries are only written here AFTER a
+        # successful Last.fm scrobble, so this is accurate and fast.
         db_scrobbled, _ = data_store.get_scrobble_history()
-
-        # ------------------------------------------------------------------
-        # Ensure we have Last.fm credentials.
-        # Client sends them from localStorage, but if that's stale/empty,
-        # fall back to the user's stored credentials in the DB.
-        # ------------------------------------------------------------------
-        if not config.get('lastfm', {}).get('api_key') and user_id:
-            db_cfg = data_store.get_config()
-            if db_cfg.get('lastfm', {}).get('api_key'):
-                config = {**config, 'lastfm': db_cfg['lastfm']}
-
-        # ------------------------------------------------------------------
-        # Build the ground-truth scrobbled set from Last.fm ONLY.
-        # The DB is intentionally NOT seeded here — it may contain stale/ghost
-        # entries from past bugs (tracks saved to DB but rejected by Last.fm,
-        # or from the old infinite-loop). Seeding from DB causes false-positive
-        # "Scrobbled" badges on tracks that are NOT actually on Last.fm.
-        # DB is used as fallback ONLY when the Last.fm API call fails entirely.
-        # ------------------------------------------------------------------
-        all_scrobbled_uids: set = set()  # EMPTY — only Last.fm fills this
-        lfm_fetch_succeeded = False
-
-        network, _ = get_lastfm_network(config)
-        if network:
-            try:
-                authenticated_user = network.get_authenticated_user()
-                lfm_user = network.get_user(authenticated_user)
-                # Paginate: Last.fm API max is 200/page. 10 pages = 2000 tracks.
-                for page in range(1, 11):
-                    try:
-                        page_tracks = lfm_user.get_recent_tracks(limit=200, page=page)
-                        if not page_tracks:
-                            break
-                        for r in page_tracks:
-                            try:
-                                for uid in generate_track_uids(r.track.title, r.track.artist.name):
-                                    all_scrobbled_uids.add(uid)
-                            except Exception:
-                                pass
-                        if len(page_tracks) < 200:
-                            break  # reached last page
-                    except Exception:
-                        break
-                lfm_fetch_succeeded = True
-                print(f"[INFO] history: loaded {len(all_scrobbled_uids)} UIDs from Last.fm")
-            except Exception as lfm_err:
-                print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), falling back to DB")
-
-        if not lfm_fetch_succeeded:
-            # Last.fm completely unreachable — fall back to DB so badges still
-            # show something rather than everything being blank.
-            all_scrobbled_uids = set(db_scrobbled)
 
         yt_history = ytmusic.get_history()
 
         tracks = []
-        for item in yt_history[:30]:  # show 30 tracks (was 20)
+        for item in yt_history[:30]:
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
             video_id = item.get('videoId')
-            # generate_track_uids now returns vid:, exact, norm:, AND clean
-            # title variants — so mismatches due to "(Remix)" etc. are caught
             track_uids = generate_track_uids(title, artist, video_id)
-            is_scrobbled = any(uid in all_scrobbled_uids for uid in track_uids)
-
+            is_scrobbled = any(uid in db_scrobbled for uid in track_uids)
             tracks.append({
                 'title': title,
                 'artist': artist,
