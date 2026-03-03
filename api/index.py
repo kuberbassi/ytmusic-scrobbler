@@ -2100,20 +2100,38 @@ def history():
         username = google_user.get('email', 'unknown')
         
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
-        scrobbled_tracks, _ = data_store.get_scrobble_history()
-        
-        history = ytmusic.get_history()
+        db_scrobbled, _ = data_store.get_scrobble_history()
+
+        # ----------------------------------------------------------------
+        # Build the ground-truth scrobbled set from Last.fm.
+        # Last.fm is THE source of truth — it covers tracks scrobbled
+        # historically, by other clients, or before this app was installed.
+        # We combine it with our DB so old/legacy entries are also caught.
+        # ----------------------------------------------------------------
+        all_scrobbled_uids: set = set(db_scrobbled)  # start with DB entries
+
+        network, _ = get_lastfm_network(config)
+        if network:
+            try:
+                authenticated_user = network.get_authenticated_user()
+                recent_lfm = network.get_user(authenticated_user).get_recent_tracks(limit=200)
+                for r in recent_lfm:
+                    for uid in generate_track_uids(r.track.title, r.track.artist.name):
+                        all_scrobbled_uids.add(uid)
+            except Exception as lfm_err:
+                print(f"[WARN] history: Last.fm fetch failed ({lfm_err}), falling back to DB only")
+
+        yt_history = ytmusic.get_history()
         
         tracks = []
-        for item in history[:20]:
+        for item in yt_history[:20]:
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
             video_id = item.get('videoId')
-            # Use the same UID generation as the scrobble engine so the check
-            # is always consistent with what was actually stored in the DB.
-            # generate_track_uids returns: ["vid:{id}", "{title}_{artist}", "norm:..."]
+            # generate_track_uids produces the same UIDs the scrobble engine
+            # uses: ["vid:{id}", "{title}_{artist}", "norm:{normalized}"]
             track_uids = generate_track_uids(title, artist, video_id)
-            is_scrobbled = any(uid in scrobbled_tracks for uid in track_uids)
+            is_scrobbled = any(uid in all_scrobbled_uids for uid in track_uids)
 
             tracks.append({
                 'title': title,
@@ -2169,12 +2187,13 @@ def scrobble():
         # Load scrobble history
         scrobbled_tracks, track_meta_map = data_store.get_scrobble_history()
         
-        # Sync with Last.fm to mark tracks already scrobbled from other sources.
+        # Sync with Last.fm to seed our DB with tracks already scrobbled anywhere.
+        # Fetch 200 tracks so old/historical listens are covered.
         # IMPORTANT: Directly update track_meta_map[uid] after every save so the
         # local map never goes stale even when the DB call returns an empty set.
         try:
             authenticated_user = network.get_authenticated_user()
-            recent = network.get_user(authenticated_user).get_recent_tracks(limit=50)
+            recent = network.get_user(authenticated_user).get_recent_tracks(limit=200)
             lastfm_synced_count = 0
             for r in recent:
                 # Generate ALL possible UIDs for this track
