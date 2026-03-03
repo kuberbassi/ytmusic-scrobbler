@@ -2109,10 +2109,12 @@ def history():
             title = item.get('title', 'Unknown')
             artist = item.get('artists', [{}])[0].get('name', 'Unknown')
             video_id = item.get('videoId')
-            # Check both videoId and title_artist formats
-            title_artist_uid = f"{title}_{artist}"
-            is_scrobbled = (video_id and video_id in scrobbled_tracks) or (title_artist_uid in scrobbled_tracks)
-            
+            # Use the same UID generation as the scrobble engine so the check
+            # is always consistent with what was actually stored in the DB.
+            # generate_track_uids returns: ["vid:{id}", "{title}_{artist}", "norm:..."]
+            track_uids = generate_track_uids(title, artist, video_id)
+            is_scrobbled = any(uid in scrobbled_tracks for uid in track_uids)
+
             tracks.append({
                 'title': title,
                 'artist': artist,
