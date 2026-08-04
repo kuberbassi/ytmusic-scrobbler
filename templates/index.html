@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YT Music Scrobbler - Sync YouTube Music to Last.fm</title>
+    <meta name="description"
+        content="Automatically scrobble your YouTube Music listening history to Last.fm in real-time across all your devices. Free, secure, and open-source.">
+    <meta name="keywords"
+        content="YouTube Music, Last.fm, scrobbler, music scrobbler, YT Music Last.fm sync, music history tracking">
+    <meta name="author" content="Kuber Bassi">
+    <meta name="theme-color" content="#07070a">
+    <meta name="robots" content="index, follow">
+    <meta property="og:title" content="YT Music Scrobbler - Sync YouTube Music to Last.fm">
+    <meta property="og:description"
+        content="Scrobble YouTube Music listening history to Last.fm seamlessly across PC, Mobile, and TV.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="https://ytscrobbler.kuberbassi.com/Icon.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="YT Music Scrobbler - Sync YouTube Music to Last.fm">
+    <meta name="twitter:description"
+        content="Scrobble YouTube Music listening history to Last.fm automatically across all devices.">
+    <meta name="twitter:image" content="https://ytscrobbler.kuberbassi.com/Icon.png">
+    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com">
+    <link rel="icon" type="image/png" href="/Icon.png">
+    <link rel="shortcut icon" href="/Icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="/static/js/app.js" defer></script>
+</head>
+
+<body data-theme="dark">
+    <div class="toast-container" id="toasts"></div>
+
+    <header class="header">
+        <a href="/" class="logo">
+            <div class="logo-img-wrapper">
+                <img src="/Icon.png" alt="YT Music Scrobbler Icon">
+            </div>
+            YT Music Scrobbler
+        </a>
+
+        <div class="header-actions">
+            <div id="nav-status-indicators" style="display:none; gap:8px;">
+                <div id="nav-lfm" class="nav-status-pill"><span class="dot"></span> Last.fm</div>
+                <div id="nav-ytm" class="nav-status-pill"><span class="dot"></span> YT Music</div>
+            </div>
+            <div id="user-area"></div>
+            <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme">
+                <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Handcrafted Hero Landing Screen -->
+    <div id="login-screen" class="login-screen" style="display: flex;">
+        <div class="login-hero">
+            <h1 class="login-title">YouTube Music → Last.fm</h1>
+            <p class="login-subtitle">
+                Automatically scrobble your YouTube Music listening history to Last.fm in real time across Desktop,
+                Mobile, Smart TVs, and Nest Audio.
+            </p>
+        </div>
+
+        <!-- Live Scrobble Preview Card -->
+        <div class="scrobble-flow-card">
+            <div class="scrobble-flow-side">
+                <div class="scrobble-flow-icon yt" style="background:transparent;width:38px;height:38px;">
+                    <svg width="38" height="38" viewBox="0 0 192 192" fill="none">
+                        <path stroke="#FF0000" stroke-linecap="round" stroke-linejoin="round" stroke-width="14"
+                            d="M96 170c40.869 0 74-33.131 74-74 0-40.87-33.131-74-74-74-40.87 0-74 33.13-74 74 0 40.869 33.13 74 74 74Z" />
+                        <path stroke="#FF0000" stroke-linecap="round" stroke-linejoin="round" stroke-width="14"
+                            fill="#FF0000" d="M74 130V62l60 34-60 34Z" />
+                    </svg>
+                </div>
+                <div class="scrobble-flow-meta">
+                    <h5>YouTube Music</h5>
+                    <p>Watch History Sync</p>
+                </div>
+            </div>
+            <div class="scrobble-flow-arrow">
+                <span>Syncing</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+            </div>
+            <div class="scrobble-flow-side">
+                <div class="scrobble-flow-icon lfm" style="background:transparent;width:38px;height:38px;">
+                    <svg width="38" height="38" viewBox="0 0 94 94" fill="#D51007">
+                        <path
+                            d="M89,0H5C2.238,0,0,2.239,0,5v84c0,2.761,2.238,5,5,5h84c2.762,0,5-2.239,5-5V5C94,2.239,91.762,0,89,0z M67.611,68.875 c-15.605,0-21.019-7.036-23.904-15.786l-2.887-9.021c-2.164-6.585-4.689-11.727-12.629-11.727c-5.504,0-11.094,3.969-11.094,15.064 c0,8.659,4.42,14.073,10.643,14.073c7.037,0,11.729-5.232,11.729-5.232l2.887,7.848c0,0-4.873,4.78-15.066,4.78 c-12.627,0-19.664-7.396-19.664-21.108c0-14.251,7.037-22.642,20.297-22.642c11.998,0,18.043,4.33,21.83,16.057l2.978,9.02 c2.164,6.585,5.953,11.367,15.063,11.367c6.136,0,9.379-1.354,9.379-4.691c0-2.616-1.53-4.51-6.131-5.593l-6.138-1.442 c-7.483-1.804-10.463-5.684-10.463-11.817c0-9.833,7.939-12.9,16.058-12.9c9.203,0,14.795,3.338,15.517,11.457l-9.021,1.082 c-0.361-3.879-2.705-5.502-7.035-5.502c-3.972,0-6.403,1.804-6.403,4.871c0,2.706,1.17,4.33,5.141,5.232l5.773,1.263 c7.758,1.804,11.905,5.593,11.905,12.899C86.375,65.448,78.799,68.875,67.611,68.875z" />
+                    </svg>
+                </div>
+                <div class="scrobble-flow-meta">
+                    <h5>Last.fm Profile</h5>
+                    <p>Live Scrobble Engine</p>
+                </div>
+            </div>
+        </div>
+
+        <a href="/auth/google" class="login-btn">
+            <svg viewBox="0 0 24 24">
+                <path fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853"
+                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05"
+                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                <path fill="#EA4335"
+                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+            </svg>
+            Sign in with Google
+        </a>
+
+        <div class="features-grid">
+            <div class="feature-item">
+                <div class="feature-icon-wrapper" style="color:var(--blue);">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+                        <line x1="12" y1="18" x2="12.01" y2="18" />
+                    </svg>
+                </div>
+                <div class="feature-text">
+                    <h4>Cross-Device Coverage</h4>
+                    <p>Scrobbles listening history from Phone, Web, TV, or Nest Audio.</p>
+                </div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-icon-wrapper" style="color:var(--accent);">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                    </svg>
+                </div>
+                <div class="feature-text">
+                    <h4>Serverless Background Sync</h4>
+                    <p>Automated background engine checks for new plays every 5 mins.</p>
+                </div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-icon-wrapper" style="color:var(--purple);">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+                    </svg>
+                </div>
+                <div class="feature-text">
+                    <h4>Smart Track Deduplication</h4>
+                    <p>Strips Remaster, Live, and Video suffixes for accurate Last.fm stats.</p>
+                </div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-icon-wrapper" style="color:var(--success);">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                    </svg>
+                </div>
+                <div class="feature-text">
+                    <h4>Private & Encrypted</h4>
+                    <p>Row-level security ensures isolated multi-user cloud storage.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Logged In Application -->
+    <main id="main-app" class="container" style="display: none;">
+        <div class="app-hero">
+            <h1 class="main-title">YT Music Dashboard</h1>
+            <p class="subtitle">Scrobble YouTube Music listening history to Last.fm</p>
+        </div>
+
+        <div class="tabs-wrapper">
+            <div class="tabs">
+                <div class="tab active" onclick="showTab('dashboard')">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="7" height="9" rx="1" />
+                        <rect x="14" y="3" width="7" height="5" rx="1" />
+                        <rect x="14" y="12" width="7" height="9" rx="1" />
+                        <rect x="3" y="16" width="7" height="5" rx="1" />
+                    </svg>
+                    Dashboard
+                </div>
+                <div class="tab" onclick="showTab('connect')">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                        <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    Accounts
+                </div>
+                <div class="tab" onclick="showTab('history')">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                    History
+                </div>
+                <div class="tab" onclick="showTab('guide')">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                    Setup Guide
+                </div>
+            </div>
+        </div>
+
+        <!-- Dashboard Tab -->
+        <div id="dashboard" class="tab-content active">
+            <!-- Now Playing / Status Banner -->
+            <div class="now-playing-banner">
+                <div class="now-playing-left">
+                    <div class="eq-bars">
+                        <div class="eq-bar"></div>
+                        <div class="eq-bar"></div>
+                        <div class="eq-bar"></div>
+                        <div class="eq-bar"></div>
+                    </div>
+                    <div class="now-playing-text" id="now-playing-text">
+                        Scrobbler engine <strong style="color:var(--success);">Active</strong>
+                    </div>
+                </div>
+                <div id="sync-info" class="sync-info">Waiting for sync...</div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-title">Live Connections</span>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" onclick="checkStatus()">Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div class="status-item">
+                        <div class="status-left">
+                            <div class="status-icon lastfm" style="background:transparent;box-shadow:none;">
+                                <svg width="44" height="44" viewBox="0 0 94 94" fill="#D51007">
+                                    <path
+                                        d="M89,0H5C2.238,0,0,2.239,0,5v84c0,2.761,2.238,5,5,5h84c2.762,0,5-2.239,5-5V5C94,2.239,91.762,0,89,0z M67.611,68.875 c-15.605,0-21.019-7.036-23.904-15.786l-2.887-9.021c-2.164-6.585-4.689-11.727-12.629-11.727c-5.504,0-11.094,3.969-11.094,15.064 c0,8.659,4.42,14.073,10.643,14.073c7.037,0,11.729-5.232,11.729-5.232l2.887,7.848c0,0-4.873,4.78-15.066,4.78 c-12.627,0-19.664-7.396-19.664-21.108c0-14.251,7.037-22.642,20.297-22.642c11.998,0,18.043,4.33,21.83,16.057l2.978,9.02 c2.164,6.585,5.953,11.367,15.063,11.367c6.136,0,9.379-1.354,9.379-4.691c0-2.616-1.53-4.51-6.131-5.593l-6.138-1.442 c-7.483-1.804-10.463-5.684-10.463-11.817c0-9.833,7.939-12.9,16.058-12.9c9.203,0,14.795,3.338,15.517,11.457l-9.021,1.082 c-0.361-3.879-2.705-5.502-7.035-5.502c-3.972,0-6.403,1.804-6.403,4.871c0,2.706,1.17,4.33,5.141,5.232l5.773,1.263 c7.758,1.804,11.905,5.593,11.905,12.899C86.375,65.448,78.799,68.875,67.611,68.875z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <div class="status-name">Last.fm</div>
+                                <div class="status-sub" id="lastfm-username">Not connected</div>
+                            </div>
+                        </div>
+                        <div id="lastfm-status" class="status-badge offline">
+                            <span class="dot"></span> Offline
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-left">
+                            <div class="status-icon ytmusic" style="background:transparent;box-shadow:none;">
+                                <svg width="44" height="44" viewBox="0 0 192 192" fill="none">
+                                    <path stroke="#FF0000" stroke-linecap="round" stroke-linejoin="round"
+                                        stroke-width="14"
+                                        d="M96 170c40.869 0 74-33.131 74-74 0-40.87-33.131-74-74-74-40.87 0-74 33.13-74 74 0 40.869 33.13 74 74 74Z" />
+                                    <path stroke="#FF0000" stroke-linecap="round" stroke-linejoin="round"
+                                        stroke-width="14" fill="#FF0000" d="M74 130V62l60 34-60 34Z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <div class="status-name">YouTube Music</div>
+                                <div class="status-sub" id="ytmusic-sub">Browser Headers Sync</div>
+                            </div>
+                        </div>
+                        <div id="ytmusic-status" class="status-badge offline">
+                            <span class="dot"></span> Offline
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Auto-Scrobble Engine</span>
+                </div>
+                <div class="card-body">
+                    <div class="toggle-row">
+                        <div class="toggle-info">
+                            <h3>Enable Background Auto Sync</h3>
+                            <p>Automatically polls YouTube Music history every 5 minutes</p>
+                        </div>
+                        <div class="toggle" id="auto-toggle" onclick="toggleAuto()"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><span class="card-title">Manual Actions</span></div>
+                <div class="card-body">
+                    <div class="btn-group">
+                        <button class="btn btn-primary" onclick="scrobbleNow()">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                            </svg>
+                            Scrobble Now
+                        </button>
+                        <button class="btn btn-secondary" onclick="showTab('history'); loadHistory();">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10" />
+                                <polyline points="12 6 12 12 16 14" />
+                            </svg>
+                            View History
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><span class="card-title">Recent Activity Stream</span></div>
+                <div class="card-body">
+                    <div class="log" id="log">
+                        <div class="log-entry"><span class="time">[--:--]</span> Ready to scrobble</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Accounts & Setup Tab -->
+        <div id="connect" class="tab-content">
+            <div class="card">
+                <div class="card-header"><span class="card-title">Last.fm Credentials</span></div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">API Key</label>
+                        <input type="text" class="form-input" id="lastfm-key"
+                            placeholder="32-character Last.fm API Key">
+                        <p class="form-hint">Create an API account at <a href="https://www.last.fm/api/account/create"
+                                target="_blank">last.fm/api</a></p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">API Secret</label>
+                        <input type="password" class="form-input" id="lastfm-secret"
+                            placeholder="32-character API Secret">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Session Key</label>
+                        <input type="text" class="form-input" id="lastfm-session"
+                            placeholder="Session key generated via authorization">
+                        <p class="form-hint"><a href="#" onclick="authorizeLastfm(); return false;"><svg width="13"
+                                    height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    style="vertical-align:middle;margin-right:2px;">
+                                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                                    <polyline points="15 3 21 3 21 9" />
+                                    <line x1="10" y1="14" x2="21" y2="3" />
+                                </svg> Click here to Authorize with Last.fm</a></p>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveLastfm()">Save Last.fm Account</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><span class="card-title">YouTube Music Account Headers</span></div>
+                <div class="card-body">
+                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;line-height:1.5;">
+                        Connect your YouTube Music watch history by pasting browser headers. This allows background sync
+                        across <strong>all devices</strong> (Phone, PC, TV).
+                    </p>
+
+                    <div id="method-headers">
+                        <div class="form-group">
+                            <label class="form-label">Browser Headers String</label>
+                            <textarea class="form-input" id="yt-headers"
+                                placeholder="Paste requests headers from music.youtube.com network tab here..." rows="5"
+                                style="font-family:var(--font-mono);font-size:11px;"></textarea>
+                            <p class="form-hint">Need help getting headers? Check out the <a href="#"
+                                    onclick="showTab('guide'); return false;">Step-by-step Setup Guide</a></p>
+                        </div>
+                        <button class="btn btn-primary" onclick="saveYTHeaders()">Connect YT Music</button>
+                    </div>
+
+                    <button class="btn btn-secondary" onclick="disconnectYT()" id="disconnect-btn"
+                        style="display:none;margin-top:12px;">Disconnect YT Music</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- History Tab -->
+        <div id="history" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">YouTube Music History</span>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn btn-secondary btn-sm" onclick="resetHistoryCache()"
+                            title="Clear local scrobble history cache">Reset Cache</button>
+                        <button class="btn btn-secondary btn-sm" onclick="loadHistory()">Refresh</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="history-controls">
+                        <div class="search-box">
+                            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8" />
+                                <path d="m21 21-4.3-4.3" />
+                            </svg>
+                            <input type="text" id="history-search" class="form-input"
+                                placeholder="Filter history by song or artist..." onkeyup="filterHistory()">
+                        </div>
+                    </div>
+                    <div id="history-list" class="history-list">
+                        <div class="empty">Click Refresh to load history</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Setup Guide Tab -->
+        <div id="guide" class="tab-content">
+            <div class="card">
+                <div class="card-header"><span class="card-title">How to Extract YouTube Music Browser Headers</span>
+                </div>
+                <div class="card-body">
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">1</span>Open music.youtube.com</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Open <a href="https://music.youtube.com" target="_blank">music.youtube.com</a> in your
+                            browser (Chrome, Firefox, Edge, or Brave) and ensure you are logged into your Google
+                            account.
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">2</span>Open Developer Tools</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Press <code>F12</code> or right-click anywhere on the page and select
+                            <strong>Inspect</strong>. Switch to the <strong>Network</strong> tab.
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">3</span>Filter POST Requests</div>
+                        </div>
+                        <div class="guide-step-body">
+                            In the Network tab search filter box, type <code>browse</code> or <code>player</code>. Click
+                            on any song or playlist to generate network traffic.
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">4</span>Copy Request Headers</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Click on one of the <code>browse</code> or <code>player</code> network requests. Go to the
+                            <strong>Headers</strong> tab, scroll down to <strong>Request Headers</strong>, select all
+                            text, copy it, and paste it into the Accounts tab!
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="site-footer">
+        <span>© <span id="year"></span> <a href="https://kuberbassi.com" target="_blank">Kuber Bassi</a></span>
+        <span class="footer-sep">·</span>
+        <a href="/terms">Terms</a>
+        <span class="footer-sep">·</span>
+        <a href="/privacy">Privacy</a>
+        <span class="footer-sep">·</span>
+        <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
+    </footer>
+
+    <script src="/_vercel/insights/script.js" defer></script>
+</body>
+
+</html>

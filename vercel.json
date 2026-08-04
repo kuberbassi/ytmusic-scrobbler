@@ -8,9 +8,25 @@
     {
       "src": "public/**",
       "use": "@vercel/static"
+    },
+    {
+      "src": "static/**",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
+    {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/Icon.png",
+      "dest": "/public/Icon.png"
+    },
+    {
+      "src": "/icon.png",
+      "dest": "/public/Icon.png"
+    },
     {
       "src": "/sitemap.xml",
       "dest": "/public/sitemap.xml"

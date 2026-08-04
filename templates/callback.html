@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Success - Last.fm Authorization</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #07070c;
+            color: #ffffff;
+        }
+
+        .container {
+            text-align: center;
+            padding: 24px;
+            background: #0e0e17;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+        }
+
+        .icon {
+            font-size: 32px;
+            color: #10b981;
+            margin-bottom: 8px;
+        }
+
+        .title {
+            font-size: 16px;
+            font-weight: 700;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="icon">✓</div>
+        <div class="title">Authorized with Last.fm</div>
+    </div>
+    <script>
+        if (window.opener) {
+            window.opener.postMessage({ type: 'lastfm-token', token: '{{ token }}' }, '*');
+        }
+        setTimeout(() => window.close(), 1000);
+    </script>
+</body>
+
+</html>

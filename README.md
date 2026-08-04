@@ -1,128 +1,96 @@
 # YT Music Scrobbler 🎵
 
-Automatically scrobble your YouTube Music listening history to Last.fm. Works for **all devices** (Phone, PC, TV, Nest) by reading your central YouTube Watch History.
+A fast, lightweight, and modern web application that automatically syncs your YouTube Music listening history to Last.fm from **any device** (Phone, PC, TV, Nest Audio) using central YouTube Watch History.
 
-**Live:** [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
-
-## 🌟 Features
-- **Google Sign-In:** Secure authentication with your Google account
-- **Multi-User Support:** Each user gets their own scrobble history stored in the cloud
-- **Cross-Device Sync:** Listen on any device, scrobbles sync automatically
-- **Background Sync:** Vercel Cron or external cron (cron-job.org) scrobbles every 5 minutes
-- **Smart Deduplication:** Triple-UID system (videoId, title_artist, normalized) prevents duplicate scrobbles
-- **Real-Time Dashboard:** See your scrobbles update live
-- **Persistent Storage:** Supabase database ensures nothing is lost
-- **Rate Limiting:** Per-endpoint rate limits protect against abuse
-- **Security Headers:** CSP, X-Frame-Options, XSS protection on all responses
-- **Scalable:** Optimized for 5000+ users with memory-efficient batch processing
-
-## 🚀 Quick Start (User)
-
-1. Go to [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
-2. Sign in with Google
-3. Connect your Last.fm account (enter API Key/Secret, authorize)
-4. Paste your YT Music browser headers
-5. Enable Auto Scrobble - done!
-
-Your listening history from any device will now scrobble automatically.
+**Live Instance:** [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
 
 ---
 
-## 🛠️ Self-Hosting
+## Key Features
 
-### Requirements
-- Python 3.8+
-- Supabase account (free)
-- Google Cloud Console project (for OAuth)
-- Vercel account (for deployment)
+- **📱 Cross-Device Coverage** — Scrobbles listening history from Phone, Desktop Web, Smart TV, or Google Nest devices via central YouTube Watch History.
+- **⚡ Modular Web Architecture** — Clean separation of concerns with HTML templates, Vanilla CSS design tokens, modular JavaScript engines, and lightweight Python backend API routes.
+- **🎸 Smart Performance Video Filter** — Intelligently scrobbles music performance videos, acoustic covers, live renditions, studio sessions, and instrumentals (e.g., *Twin Strings Acoustic*, *Davie504 Bass Cover*) while auto-filtering non-music videos (e.g., reaction videos, vlogs, reviews, gameplay).
+- **🔒 Bulletproof Deduplication & Single-Scrobble Lock** — Multi-UID mapping (`videoId`, raw string, normalized title/artist, primary artist) combined with in-process locking prevents duplicate scrobbles during rapid syncs.
+- **🕒 20-Minute History Freshness Cooldown** — History list items refresh intelligently so songs scrobbled hours ago render as pending when played again.
+- **🤖 Background Sync Engine** — Automated background sync with Vercel Cron or local worker polling.
+- **🔐 Multi-User Cloud Support** — Google Sign-In with isolated PostgreSQL Row-Level Security in Supabase.
 
-### 1. Database Setup (Supabase)
-1. Create a project at [supabase.com](https://supabase.com)
-2. Run `schema.sql` in SQL Editor
-3. Get your API URL and anon key from Settings > API
+---
 
-### 2. Google OAuth Setup
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a project → APIs & Services → Credentials
-3. Create OAuth 2.0 Client ID (Web application)
-4. Add authorized redirect URI: `https://your-domain.com/auth/google/callback`
-5. Copy Client ID and Client Secret
+## Project Structure
 
-### 3. Deploy to Vercel
-1. Fork this repo
-2. Connect to Vercel
-3. Add environment variables:
-   ```
-   SUPABASE_URL=https://xxx.supabase.co
-   SUPABASE_KEY=your-anon-key
-   GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
-   GOOGLE_CLIENT_SECRET=GOCSPX-xxx
-   GOOGLE_REDIRECT_URI=https://your-domain.com/auth/google/callback
-   SECRET_KEY=random-secret-for-sessions
-   CRON_SECRET=random-secret-for-cron-auth
-   ```
-4. Deploy!
+```
+ytmusic-scrobbler/
+├── api/
+│   ├── database.py       # Supabase PostgreSQL database layer & RLS
+│   └── index.py          # Flask backend API routes & scrobbling engine
+├── static/
+│   ├── css/
+│   │   └── styles.css    # Unified Vanilla CSS design system & tokens
+│   └── js/
+│       ├── app.js        # Main client application engine
+│       └── legal.js      # Legal pages script helper
+├── templates/
+│   ├── index.html        # Main dashboard & landing page
+│   ├── legal.html        # Terms of Service & Privacy Policy template
+│   └── callback.html     # Last.fm OAuth popup verification template
+├── public/               # Static public assets (icons, robots.txt, sitemap.xml)
+├── local_run.py          # Local development server runner
+├── vercel.json           # Vercel CDN static routes & serverless config
+└── requirements.txt      # Python dependencies
+```
 
-### 4. Local Development
+---
+
+## Quick Start
+
+1. Visit [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
+2. Sign in with Google.
+3. Save your Last.fm API credentials and session key in the **Accounts** tab.
+4. Paste your YT Music browser request headers.
+5. Enable **Auto Scrobble**.
+
+---
+
+## Local Development
+
 ```bash
+# 1. Clone repository
 git clone https://github.com/kuberbassi/ytmusic-scrobbler.git
 cd ytmusic-scrobbler
+
+# 2. Setup virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\Activate.ps1
+
+# 3. Install dependencies
 pip install -r requirements.txt
-# Create .env with the variables above (use localhost:3000 for redirect)
+
+# 4. Run locally
 python local_run.py
 ```
 
-## 📱 How It Works
+Open `http://localhost:3000` in your browser.
 
-1. **Authentication:** Users sign in with Google → stored in `users` table
-2. **Credentials:** Each user saves their Last.fm + YT Music credentials → stored per-user in Supabase
-3. **Background Sync:** Vercel Cron (or external like cron-job.org) calls `/api/cron` every 5 minutes
-4. **Scrobble Logic:** Fetches YT Music history → checks against stored scrobbles → sends new ones to Last.fm
-5. **Deduplication:** Triple-UID system (videoId, title_artist, normalized) ensures no duplicates
+---
 
-> **Note:** Repeat detection was intentionally removed. Since the YT Music API doesn't provide real-time playback status (can't tell if music is playing, paused, or stopped), only first plays are scrobbled. This prevents false scrobbles when the user stops listening.
+## Deployment (Vercel)
 
-## 🏗️ Architecture
+Set the following environment variables on Vercel:
 
-| Component | Technology |
-|-----------|------------|
-| Backend | Flask (Python) |
-| Database | Supabase (PostgreSQL) |
-| Auth | Google OAuth 2.0 |
-| Hosting | Vercel (Serverless) |
-| Background Jobs | Vercel Cron / External (cron-job.org) |
-
-## 🔒 Security & Rate Limiting
-
-**Security Headers** (auto-applied to all responses):
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `X-XSS-Protection: 1; mode=block`
-- `Content-Security-Policy` (HTML only)
-
-**Rate Limits:**
-| Endpoint | Limit |
-|----------|-------|
-| Default | 60/min |
-| Scrobble | 10/min |
-| Auth | 5/min |
-| Cron | 2/min |
-
-## ⏰ Cron Configuration
-
-For external cron services (e.g., cron-job.org):
-```
-URL: https://your-domain.com/api/cron
-Schedule: Every 5 minutes
-Header: Authorization: Bearer YOUR_CRON_SECRET
+```env
+SUPABASE_URL=https://your-supabase-project.supabase.co
+SUPABASE_KEY=your-supabase-anon-key
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_REDIRECT_URI=https://your-domain.com/auth/google/callback
+SECRET_KEY=your-random-session-secret
+CRON_SECRET=your-cron-secret
 ```
 
-Set `CRON_SECRET` env var to secure the endpoint.
+---
 
-**Query params for large-scale deployments:**
-- `batch_size` - Users per batch (default 50, max 100)
-- `offset` - Starting offset for distributed processing
-- `max_users` - Max users per run (default 200, max 500)
+## License
 
-## 📄 License
-MIT License
+[MIT](LICENSE)

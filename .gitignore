@@ -9,6 +9,10 @@ headers_auth.json
 api/config.json
 api/scrobbled.json
 
+# Scratch & Test Artifacts
+scratch/
+.antigravityignore
+
 # Python
 __pycache__/
 *.py[cod]
@@ -30,3 +34,4 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+

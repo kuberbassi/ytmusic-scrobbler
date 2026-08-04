@@ -9,6 +9,10 @@ load_dotenv()
 
 from api.index import app
 
+import sys
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 if __name__ == '__main__':
     print("🎵 YT Music Scrobbler")
     print("=" * 40)

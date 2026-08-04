@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - YT Music Scrobbler</title>
+    <meta name="description" content="{{ title }} for YouTube Music Scrobbler.">
+    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com{{ path }}">
+    <link rel="icon" type="image/png" href="/Icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="/static/js/legal.js" defer></script>
+</head>
+
+<body data-theme="dark">
+    <header class="header">
+        <a href="/" class="logo">
+            <div class="logo-img-wrapper">
+                <img src="/Icon.png" alt="YT Music Scrobbler Icon">
+            </div>
+            YT Music Scrobbler
+        </a>
+        <div class="header-actions">
+            <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme">
+                <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <main class="container" style="padding-top: 40px; padding-bottom: 60px;">
+        <div class="card" style="padding: 32px;">
+            <h1 style="font-size: 28px; font-weight: 800; margin-bottom: 24px; letter-spacing: -0.5px;">{{ title }}</h1>
+            <div style="color: var(--text-secondary); line-height: 1.7; font-size: 14px;">
+                {{ content|safe }}
+            </div>
+            <a class="btn btn-secondary btn-sm" href="/" style="margin-top: 32px; display: inline-flex;">← Back to
+                App</a>
+        </div>
+    </main>
+
+    <footer class="site-footer">
+        <span>© <span id="year"></span> <a href="https://kuberbassi.com" target="_blank">Kuber Bassi</a></span>
+        <span class="footer-sep">·</span>
+        <a href="/terms">Terms</a>
+        <span class="footer-sep">·</span>
+        <a href="/privacy">Privacy</a>
+        <span class="footer-sep">·</span>
+        <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
+    </footer>
+
+    <script src="/_vercel/insights/script.js" defer></script>
+</body>
+
+</html>

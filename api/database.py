@@ -7,6 +7,7 @@ import os
 import json
 import time
 import requests
+import threading
 from typing import Optional, Dict, Any, Tuple, Set
 from datetime import datetime, timedelta
 
@@ -411,39 +412,53 @@ def update_user_settings(user_id: str, settings: Dict) -> bool:
         return False
 
 
+file_storage_lock = threading.Lock()
+
 def get_user_scrobble_history(user_id: str) -> Tuple[Set[str], Dict[str, Any]]:
-    """Get user's scrobble history"""
-    if not REST_API_AVAILABLE:
+    """Get user's scrobble history with Range pagination for unlimited scale"""
+    if not REST_API_AVAILABLE or not user_id:
         return set(), {}
     
     try:
-        response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/scrobbles",
-            params={
-                'user_id': f'eq.{user_id}',
-                'select': 'track_uid,track_title,artist,last_scrobble_time,scrobble_count'
-            },
-            headers=get_headers(),
-            timeout=15
-        )
+        history_set = set()
+        meta_map = {}
+        offset = 0
+        limit = 1000
         
-        if response.status_code == 200:
-            history_set = set()
-            meta_map = {}
+        while True:
+            headers = get_headers()
+            headers['Range'] = f"{offset}-{offset + limit - 1}"
             
-            for row in response.json():
-                track_uid = row['track_uid']
-                history_set.add(track_uid)
-                meta_map[track_uid] = {
-                    'timestamp': row.get('last_scrobble_time') or 0,
-                    'track_title': row.get('track_title') or '',
-                    'artist': row.get('artist') or '',
-                    'scrobble_count': row.get('scrobble_count') or 1
-                }
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/scrobbles",
+                params={
+                    'user_id': f'eq.{user_id}',
+                    'select': 'track_uid,track_title,artist,last_scrobble_time,scrobble_count'
+                },
+                headers=headers,
+                timeout=15
+            )
             
-            return history_set, meta_map
-        
-        return set(), {}
+            if response.status_code in (200, 206):
+                rows = response.json()
+                if not rows:
+                    break
+                for row in rows:
+                    track_uid = row['track_uid']
+                    history_set.add(track_uid)
+                    meta_map[track_uid] = {
+                        'timestamp': row.get('last_scrobble_time') or 0,
+                        'track_title': row.get('track_title') or '',
+                        'artist': row.get('artist') or '',
+                        'scrobble_count': row.get('scrobble_count') or 1
+                    }
+                if len(rows) < limit:
+                    break
+                offset += limit
+            else:
+                break
+                
+        return history_set, meta_map
         
     except requests.RequestException as e:
         print(f"[ERROR] get_user_scrobble_history failed: {e}")
@@ -451,58 +466,56 @@ def get_user_scrobble_history(user_id: str) -> Tuple[Set[str], Dict[str, Any]]:
 
 
 def save_user_scrobble(user_id: str, track_uid: str, meta: Dict) -> Tuple[Set[str], Dict[str, Any]]:
-    """Save a scrobble to the database, handling upsert"""
-    if not REST_API_AVAILABLE:
+    """Save a scrobble to Supabase using native REST upsert"""
+    if not REST_API_AVAILABLE or not user_id:
         return set(), {}
     
     current_time = int(time.time())
     
     try:
-        # First, try to get existing scrobble
-        response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/scrobbles",
-            params={
-                'user_id': f'eq.{user_id}',
-                'track_uid': f'eq.{track_uid}',
-                'select': 'id,scrobble_count'
+        headers = get_headers()
+        headers['Prefer'] = 'resolution=merge-duplicates'
+        
+        # Native Supabase upsert on (user_id, track_uid)
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/scrobbles?on_conflict=user_id,track_uid",
+            headers=headers,
+            json={
+                'user_id': user_id,
+                'track_uid': track_uid,
+                'track_title': meta.get('track_title', ''),
+                'artist': meta.get('artist', ''),
+                'last_scrobble_time': meta.get('timestamp', current_time),
+                'scrobble_count': 1
             },
-            headers=get_headers(),
             timeout=10
         )
         
-        if response.status_code == 200 and response.json():
-            # Update existing scrobble
-            existing = response.json()[0]
-            new_count = (existing.get('scrobble_count') or 0) + 1
-            
-            response = requests.patch(
+        if response.status_code not in (200, 201, 204):
+            # Fallback if on_conflict parameter is missing in Supabase schema: GET then PATCH/POST
+            get_resp = requests.get(
                 f"{SUPABASE_URL}/rest/v1/scrobbles",
-                params={'id': f"eq.{existing['id']}"},
+                params={'user_id': f'eq.{user_id}', 'track_uid': f'eq.{track_uid}', 'select': 'id,scrobble_count'},
                 headers=get_headers(),
-                json={
-                    'last_scrobble_time': meta.get('timestamp', current_time),
-                    'scrobble_count': new_count,
-                    'updated_at': datetime.utcnow().isoformat()
-                },
                 timeout=10
             )
-        else:
-            # Insert new scrobble
-            response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/scrobbles",
-                headers=get_headers(),
-                json={
-                    'user_id': user_id,
-                    'track_uid': track_uid,
-                    'track_title': meta.get('track_title', ''),
-                    'artist': meta.get('artist', ''),
-                    'last_scrobble_time': meta.get('timestamp', current_time),
-                    'scrobble_count': 1
-                },
-                timeout=10
-            )
+            if get_resp.status_code == 200 and get_resp.json():
+                existing = get_resp.json()[0]
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/scrobbles",
+                    params={'id': f"eq.{existing['id']}"},
+                    headers=get_headers(),
+                    json={'last_scrobble_time': meta.get('timestamp', current_time), 'scrobble_count': (existing.get('scrobble_count') or 0) + 1},
+                    timeout=10
+                )
+            else:
+                requests.post(
+                    f"{SUPABASE_URL}/rest/v1/scrobbles",
+                    headers=get_headers(),
+                    json={'user_id': user_id, 'track_uid': track_uid, 'track_title': meta.get('track_title', ''), 'artist': meta.get('artist', ''), 'last_scrobble_time': meta.get('timestamp', current_time), 'scrobble_count': 1},
+                    timeout=10
+                )
         
-        # Return updated history
         return get_user_scrobble_history(user_id)
         
     except requests.RequestException as e:
@@ -515,7 +528,7 @@ def save_user_scrobble(user_id: str, track_uid: str, meta: Dict) -> Tuple[Set[st
 # ============================================================================
 
 class FileStorage:
-    """File-based storage for single-user/local mode"""
+    """File-based storage for single-user/local mode with thread locking"""
     
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
@@ -540,31 +553,43 @@ class FileStorage:
             return False
 
     def load_scrobbles(self) -> Tuple[Set[str], Dict[str, Any]]:
-        if os.path.exists(self.scrobbled_file):
-            try:
-                with open(self.scrobbled_file, "r") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return set(data), {}
-                    return set(data.get('history', [])), data.get('track_meta', {})
-            except:
-                return set(), {}
-        return set(), {}
+        with file_storage_lock:
+            if os.path.exists(self.scrobbled_file):
+                try:
+                    with open(self.scrobbled_file, "r") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            return set(data), {}
+                        return set(data.get('history', [])), data.get('track_meta', {})
+                except:
+                    return set(), {}
+            return set(), {}
 
     def save_scrobble(self, track_uid: str, meta: Dict) -> Tuple[Set[str], Dict[str, Any]]:
-        history, track_meta = self.load_scrobbles()
-        history.add(track_uid)
-        if meta:
-            existing = track_meta.get(track_uid, {})
-            existing.update(meta)
-            existing['scrobble_count'] = existing.get('scrobble_count', 0) + 1
-            track_meta[track_uid] = existing
-        try:
-            with open(self.scrobbled_file, "w") as f:
-                json.dump({'history': list(history), 'track_meta': track_meta}, f)
-        except:
-            pass
-        return history, track_meta
+        with file_storage_lock:
+            history, track_meta = set(), {}
+            if os.path.exists(self.scrobbled_file):
+                try:
+                    with open(self.scrobbled_file, "r") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            history, track_meta = set(data), {}
+                        else:
+                            history, track_meta = set(data.get('history', [])), data.get('track_meta', {})
+                except:
+                    pass
+            history.add(track_uid)
+            if meta:
+                existing = track_meta.get(track_uid, {})
+                existing.update(meta)
+                existing['scrobble_count'] = existing.get('scrobble_count', 0) + 1
+                track_meta[track_uid] = existing
+            try:
+                with open(self.scrobbled_file, "w") as f:
+                    json.dump({'history': list(history), 'track_meta': track_meta}, f)
+            except:
+                pass
+            return history, track_meta
 
 
 _file_storage: Optional[FileStorage] = None

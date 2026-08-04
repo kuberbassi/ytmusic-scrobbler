@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, redirect, session, url_for
+from flask import Flask, request, jsonify, render_template, redirect, session, url_for, send_from_directory
 import os
 import json
 import re
@@ -54,7 +54,16 @@ def add_sync_log(artist, title, status="Synced", user=None):
     sync_logs.insert(0, entry)
     sync_logs = sync_logs[:50]  # Keep last 50 for multi-user
 
-app = Flask(__name__)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+template_dir = os.path.join(BASE_DIR, 'templates')
+static_dir = os.path.join(BASE_DIR, 'static')
+
+app = Flask(
+    __name__,
+    template_folder=template_dir,
+    static_folder=static_dir,
+    static_url_path='/static'
+)
 
 # Build a STABLE secret key so sessions survive serverless cold starts.
 # If SECRET_KEY env var isn't set, derive a deterministic key from other
@@ -193,10 +202,14 @@ def strip_title_variants(title: str) -> str:
     """
     Strip common YT Music parenthetical/bracketed suffixes to get the base title.
     e.g. "Song (2024 Remastered Version)" → "Song"
-         "Song [Mike Geno Remix]" → "Song"
+         "Song [Official Video]" → "Song"
     Iterates until stable so nested variants are also handled.
     """
+    if not title:
+        return ""
     t = title.strip()
+    # Strip common unparenthesized trailing noise like "- Official Audio", " - Topic"
+    t = re.sub(r'\s*-\s*(?:official\s+(?:video|audio|music\s*video|lyric\s*video)|topic|lyric\s*video|visualizer)$', '', t, flags=re.IGNORECASE).strip()
     for _ in range(5):
         stripped = _TITLE_VARIANT_RE.sub('', t).strip()
         if stripped == t:
@@ -213,19 +226,27 @@ def extract_primary_artist(artist: str) -> str:
     on both sides to produce matching UIDs.
     """
     if not artist:
-        return artist
-    parts = _ARTIST_SPLIT_RE.split(artist.strip())
-    return parts[0].strip() if parts else artist.strip()
+        return ""
+    # Strip " - Topic" from artist name if present
+    clean_a = re.sub(r'\s*-\s*topic$', '', artist.strip(), flags=re.IGNORECASE).strip()
+    parts = _ARTIST_SPLIT_RE.split(clean_a)
+    return parts[0].strip() if parts else clean_a
 
 
 def normalize_string(s: str) -> str:
-    """Normalize a string for consistent comparison"""
+    """Normalize a string for consistent comparison across platforms"""
     if not s:
         return ""
+    # Lowercase & strip spaces
     s = s.lower().strip()
-    for feat in [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ']:
+    # Normalize unicode apostrophes, dashes, and quotes
+    s = s.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    s = s.replace("–", "-").replace("—", "-")
+    # Remove featured artist tags
+    for feat in [' feat.', ' feat ', ' ft.', ' ft ', ' featuring ', ' (feat.', ' [feat.']:
         if feat in s:
             s = s.split(feat)[0].strip()
+    # Keep alphanumeric characters and spaces only
     s = ''.join(c for c in s if c.isalnum() or c == ' ')
     s = ' '.join(s.split())
     return s
@@ -241,8 +262,8 @@ def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
     uids = []
 
     # 1. Video ID — most precise
-    if video_id:
-        uids.append(f"vid:{video_id}")
+    if video_id and str(video_id).strip() and str(video_id) != 'no-id':
+        uids.append(f"vid:{str(video_id).strip()}")
 
     primary_artist = extract_primary_artist(artist)
     clean_title = strip_title_variants(title)
@@ -253,8 +274,10 @@ def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
             uids.append(f"{t}_{a}")
         norm_t = normalize_string(t)
         norm_a = normalize_string(a)
-        if norm_t and norm_a and f"norm:{norm_t}_{norm_a}" not in uids:
-            uids.append(f"norm:{norm_t}_{norm_a}")
+        if norm_t and norm_a:
+            n_uid = f"norm:{norm_t}_{norm_a}"
+            if n_uid not in uids:
+                uids.append(n_uid)
 
     # 2. Full artist string (as returned by API)
     _add_variants(title, artist)
@@ -273,18 +296,103 @@ def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
     return uids
 
 
-def is_track_scrobbled(track_uids: list, track_meta_map: dict, data_store=None) -> tuple:
+_NON_MUSIC_KEYWORDS = re.compile(
+    r'\b(?:'
+    r'react(?:ion|ing|s)?|'
+    r'review(?:ing|s)?|'
+    r'unboxing|'
+    r'vlog(?:s)?|'
+    r'tier\s*list|'
+    r'interview|'
+    r'podcast|'
+    r'commentary|'
+    r'gameplay|'
+    r'walkthrough|'
+    r'playthrough|'
+    r'lets\s*play|'
+    r'try\s*not\s*to|'
+    r'challenge|'
+    r'q&a|'
+    r'behind\s*the\s*scenes'
+    r')\b',
+    re.IGNORECASE
+)
+
+_MUSIC_EXEMPT_KEYWORDS = re.compile(
+    r'\b(?:'
+    r'cover|instrumental|remix|acoustic|rework|bootleg|flip|mashup|'
+    r'live|performance|session|unplugged|rendition|reprise|medley|'
+    r'jam|tribute|orchestra|symphony|version|official\s*video|'
+    r'official\s*audio|playalong|bass\s*cover|guitar\s*cover|drum\s*cover|'
+    r'studio\s*version|live\s*version|acoustic\s*version'
+    r')\b',
+    re.IGNORECASE
+)
+
+def is_music_content(item: dict) -> bool:
     """
-    Check if a track has been scrobbled using ANY of its UIDs.
+    Filter out non-music YouTube content (reaction videos, vlogs, podcasts, reviews)
+    while preserving actual music (official songs, music videos, covers, live performances, instrumental covers).
+    """
+    if not isinstance(item, dict):
+        return True
+        
+    title = item.get('title', '')
+    artists = item.get('artists', [])
+    artist = artists[0].get('name', '') if artists else item.get('author', '')
+    album = item.get('album', {}).get('name', '') if item.get('album') else ''
+    result_type = item.get('resultType') or item.get('category')
+    
+    # 1. Has explicit album metadata or SONG resultType -> Genuine Music
+    if album and str(album).strip():
+        return True
+    if result_type in ('SONG', 'MUSIC_VIDEO_TYPE_ATV', 'MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE_MUSIC'):
+        return True
+
+    title_lower = str(title).lower()
+
+    # 2. Music-related keywords (e.g. "Davie504 - RHCP Bass Cover", "Guitar Cover", "Live") -> Always Music!
+    if _MUSIC_EXEMPT_KEYWORDS.search(title_lower):
+        return True
+
+    # 3. Non-music video keywords (e.g. "Davie504 Reaction to 100 Basslines", "Album Review", "Unboxing") -> Skip!
+    if _NON_MUSIC_KEYWORDS.search(title_lower):
+        return False
+
+    return True
+
+
+global_scrobble_session_cache = {}  # In-process cache of scrobbled UIDs -> timestamp
+SCROBBLE_COOLDOWN_SECONDS = 20 * 60  # 20 minutes cooldown window
+
+def is_track_scrobbled(track_uids: list, track_meta_map: dict, data_store=None, cooldown_seconds=SCROBBLE_COOLDOWN_SECONDS) -> tuple:
+    """
+    Check if a track has been scrobbled in the current session or within the recent cooldown window (20 min).
     Returns: (is_scrobbled: bool, matching_uid: str or None)
     """
+    now = int(time.time())
     for uid in track_uids:
-        # Check persistent storage
-        if uid in track_meta_map:
-            return True, uid
-        # Check session storage
+        # 1. Check in-process global session cache (catches instant single-scrobbles)
+        if uid in global_scrobble_session_cache:
+            ts = global_scrobble_session_cache[uid]
+            if now - ts < cooldown_seconds:
+                return True, uid
+
+        # 2. Check session storage (scrobbled during active sync session)
         if data_store and data_store.is_session_scrobbled(uid):
             return True, uid
+            
+        # 3. Check persistent storage (only if scrobbled within cooldown window)
+        meta = track_meta_map.get(uid)
+        if meta:
+            timestamp = meta.get('timestamp', 0)
+            try:
+                ts = int(timestamp)
+            except (TypeError, ValueError):
+                ts = 0
+            if ts > 0 and (now - ts < cooldown_seconds):
+                return True, uid
+                
     return False, None
 
 
@@ -418,1120 +526,6 @@ class ConfigManager:
                 return user.get('id'), username
         except Exception as e:
             print(f"[WARN] Failed to get user from session: {e}")
-        
-        return None, None
-
-# YTMusic Scrobbler - Powered by Browser Headers
-
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YT Music Scrobbler</title>
-    <meta name="description" content="Automatically scrobble your YouTube Music listening history to Last.fm. Free and open-source.">
-    <meta name="keywords" content="YouTube Music, Last.fm, scrobbler, music tracker, listening history">
-    <meta name="author" content="Kuber Bassi">
-    <meta name="robots" content="index, follow">
-    <meta property="og:title" content="YT Music Scrobbler">
-    <meta property="og:description" content="Sync YouTube Music to Last.fm automatically">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://ytscrobbler.kuberbassi.com">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="YT Music Scrobbler">
-    <meta name="twitter:description" content="Automatically scrobble your YouTube Music listening history to Last.fm.">
-    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%23000' rx='20' width='100' height='100'/><polygon fill='%23fff' points='35,25 35,75 75,50'/></svg>">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-primary: #000;
-            --bg-secondary: #0a0a0a;
-            --bg-tertiary: #111;
-            --bg-elevated: #171717;
-            --border: #262626;
-            --border-hover: #404040;
-            --text-primary: #fafafa;
-            --text-secondary: #a1a1a1;
-            --text-tertiary: #737373;
-            --accent: #fff;
-            --success: #22c55e;
-            --error: #ef4444;
-            --blue: #3b82f6;
-        }
-        [data-theme="light"] {
-            --bg-primary: #fff;
-            --bg-secondary: #fafafa;
-            --bg-tertiary: #f5f5f5;
-            --bg-elevated: #fff;
-            --border: #e5e5e5;
-            --border-hover: #d4d4d4;
-            --text-primary: #171717;
-            --text-secondary: #525252;
-            --text-tertiary: #a3a3a3;
-            --accent: #000;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            -webkit-font-smoothing: antialiased;
-        }
-        
-        /* Toast */
-        .toast-container { position: fixed; top: 16px; right: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
-        .toast {
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 12px 16px;
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            transform: translateX(calc(100% + 20px));
-            transition: transform 0.2s ease;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-        }
-        .toast.show { transform: translateX(0); }
-        .toast-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-        .toast.success .toast-dot { background: var(--success); }
-        .toast.error .toast-dot { background: var(--error); }
-        .toast.info .toast-dot { background: var(--blue); }
-
-        /* Header */
-        .header {
-            border-bottom: 1px solid var(--border);
-            padding: 0 24px;
-            height: 48px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: var(--bg-secondary);
-        }
-        .logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
-        .logo svg { width: 20px; height: 20px; }
-        .header-actions { display: flex; align-items: center; gap: 8px; }
-        .theme-btn {
-            width: 32px; height: 32px;
-            background: transparent;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: var(--text-secondary);
-            transition: all 0.15s ease;
-        }
-        .theme-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
-        .theme-btn svg { width: 16px; height: 16px; }
-
-        /* Main */
-        .container { max-width: 600px; margin: 0 auto; padding: 48px 24px; flex: 1; }
-        h1 { font-size: 24px; font-weight: 600; margin-bottom: 4px; letter-spacing: -0.3px; }
-        .subtitle { color: var(--text-secondary); font-size: 14px; margin-bottom: 32px; }
-
-        /* Tabs */
-        .tabs { display: flex; gap: 24px; margin-bottom: 32px; border-bottom: 1px solid var(--border); }
-        .tab {
-            padding: 12px 0;
-            cursor: pointer;
-            color: var(--text-tertiary);
-            font-size: 14px;
-            border-bottom: 1px solid transparent;
-            margin-bottom: -1px;
-            transition: all 0.15s ease;
-        }
-        .tab:hover { color: var(--text-secondary); }
-        .tab.active { color: var(--text-primary); border-color: var(--text-primary); }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; animation: fadeIn 0.2s ease; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-
-        /* Card */
-        .card {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            margin-bottom: 16px;
-        }
-        .card-header {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .card-title { font-size: 12px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
-        .card-body { padding: 16px; }
-
-        /* Status */
-        .status-item { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; }
-        .status-item:not(:last-child) { border-bottom: 1px solid var(--border); }
-        .status-left { display: flex; align-items: center; gap: 12px; }
-        .status-icon {
-            width: 32px; height: 32px;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 600;
-            font-size: 12px;
-            color: #fff;
-        }
-        .status-icon.lastfm { background: #d51007; }
-        .status-icon.ytmusic { background: #ff0000; }
-        .status-name { font-size: 14px; font-weight: 500; }
-        .status-badge {
-            font-size: 12px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .status-badge .dot { width: 6px; height: 6px; border-radius: 50%; }
-        .status-badge.online { background: rgba(34,197,94,0.15); color: var(--success); }
-        .status-badge.online .dot { background: var(--success); }
-        .status-badge.offline { background: rgba(239,68,68,0.15); color: var(--error); }
-        .status-badge.offline .dot { background: var(--error); }
-
-        /* Buttons */
-        .btn {
-            height: 36px;
-            padding: 0 14px;
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 500;
-            cursor: pointer;
-            border: none;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: all 0.15s ease;
-        }
-        .btn-primary { background: var(--accent); color: var(--bg-primary); }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--text-primary); }
-        .btn-secondary:hover { border-color: var(--border-hover); background: var(--bg-tertiary); }
-        .btn-sm { height: 28px; padding: 0 10px; font-size: 12px; }
-        .btn-google {
-            background: #fff;
-            color: #1f1f1f;
-            border: 1px solid #dadce0;
-            height: 40px;
-            padding: 0 16px;
-            font-weight: 500;
-        }
-        .btn-google:hover { background: #f8f9fa; border-color: #c6c6c6; }
-        .btn-google svg { width: 18px; height: 18px; }
-        .btn-group { display: flex; gap: 8px; }
-
-        /* Form */
-        .form-group { margin-bottom: 16px; }
-        .form-label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text-primary); }
-        .form-input {
-            width: 100%;
-            height: 36px;
-            padding: 0 12px;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            font-size: 13px;
-            transition: border-color 0.15s ease;
-        }
-        .form-input:focus { outline: none; border-color: var(--text-tertiary); }
-        .form-input::placeholder { color: var(--text-tertiary); }
-        .form-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 6px; }
-        .form-hint a { color: var(--blue); text-decoration: none; }
-        .form-hint a:hover { text-decoration: underline; }
-
-        /* Toggle Row */
-        .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; }
-        .toggle-row:not(:last-child) { border-bottom: 1px solid var(--border); }
-        .toggle-info h3 { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
-        .toggle-info p { font-size: 13px; color: var(--text-secondary); }
-        
-        /* Toggle Switch */
-        .toggle {
-            width: 40px; height: 22px;
-            background: var(--border);
-            border-radius: 11px;
-            cursor: pointer;
-            position: relative;
-            transition: background 0.2s ease;
-            flex-shrink: 0;
-        }
-        .toggle::after {
-            content: '';
-            position: absolute;
-            width: 16px; height: 16px;
-            background: #fff;
-            border-radius: 50%;
-            top: 3px; left: 3px;
-            transition: transform 0.2s ease;
-        }
-        .toggle.active { background: var(--success); }
-        .toggle.active::after { transform: translateX(18px); }
-
-        /* Select */
-        .form-select {
-            height: 32px;
-            padding: 0 28px 0 10px;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            font-size: 13px;
-            cursor: pointer;
-            appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 8px center;
-        }
-        .form-select:focus { outline: none; border-color: var(--text-tertiary); }
-
-        /* Divider */
-        .divider { display: flex; align-items: center; gap: 16px; margin: 20px 0; color: var(--text-tertiary); font-size: 12px; }
-        .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
-
-        /* Track */
-        .track { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; }
-        .track:not(:last-child) { border-bottom: 1px solid var(--border); }
-        .track-info h4 { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
-        .track-info p { font-size: 12px; color: var(--text-secondary); }
-        .track-badge { font-size: 11px; padding: 2px 6px; border-radius: 4px; }
-        .track-badge.done { background: rgba(34,197,94,0.15); color: var(--success); }
-
-        /* Log */
-        .log { font-family: 'SF Mono', Monaco, 'Courier New', monospace; font-size: 12px; max-height: 120px; overflow-y: auto; }
-        .log-entry { padding: 4px 0; color: var(--text-secondary); line-height: 1.4; border-bottom: 1px solid rgba(255,255,255,0.03); }
-        .log-entry .time { color: var(--text-tertiary); margin-right: 4px; }
-        .log-entry.error { color: var(--error); }
-        .log-entry b { color: var(--text-primary); }
-
-        /* Empty */
-        .empty { text-align: center; padding: 32px; color: var(--text-tertiary); font-size: 13px; }
-
-        /* Footer */
-        .footer {
-            border-top: 1px solid var(--border);
-            padding: 16px 24px;
-            text-align: center;
-            font-size: 12px;
-            color: var(--text-tertiary);
-        }
-        .footer a { color: var(--text-secondary); text-decoration: none; }
-        .footer a:hover { color: var(--text-primary); }
-
-        .sync-info { font-size: 11px; margin-top: 12px; color: var(--text-tertiary); text-align: center; }
-        .sync-info.active { color: var(--success); }
-
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-        /* Modal */
-        .modal-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.6);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-            opacity: 0;
-            visibility: hidden;
-            transition: all 0.2s ease;
-        }
-        .modal-overlay.show { opacity: 1; visibility: visible; }
-        .modal {
-            background: var(--bg-secondary);
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            padding: 32px;
-            max-width: 400px;
-            width: 90%;
-            text-align: center;
-            transform: scale(0.95);
-            transition: transform 0.2s ease;
-        }
-        .modal-overlay.show .modal { transform: scale(1); }
-        .modal-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
-        .modal-text { font-size: 14px; color: var(--text-secondary); margin-bottom: 24px; }
-        .device-code {
-            font-family: 'SF Mono', Monaco, 'Courier New', monospace;
-            font-size: 32px;
-            font-weight: 600;
-            letter-spacing: 4px;
-            padding: 16px 24px;
-            background: var(--bg-tertiary);
-            border-radius: 8px;
-            margin-bottom: 16px;
-            user-select: all;
-        }
-        .device-link {
-            font-size: 14px;
-            color: var(--blue);
-            margin-bottom: 24px;
-            display: block;
-        }
-        .spinner {
-            width: 20px;
-            height: 20px;
-            border: 2px solid var(--border);
-            border-top-color: var(--blue);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .modal-status { font-size: 13px; color: var(--text-tertiary); margin-top: 16px; }
-        
-        /* Login Screen */
-        .login-screen {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: calc(100vh - 108px);
-            text-align: center;
-            padding: 48px 24px;
-        }
-        .login-hero { max-width: 540px; margin-bottom: 40px; }
-        .login-logo { font-size: 56px; margin-bottom: 16px; }
-        .login-title { font-size: 32px; font-weight: 700; margin-bottom: 12px; letter-spacing: -0.5px; }
-        .login-subtitle { color: var(--text-secondary); font-size: 16px; line-height: 1.6; margin-bottom: 0; max-width: 460px; }
-        .login-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            padding: 14px 28px;
-            border-radius: 8px;
-            font-size: 15px;
-            font-weight: 500;
-            cursor: pointer;
-            border: 1px solid var(--border);
-            background: var(--bg-elevated);
-            color: var(--text-primary);
-            transition: all 0.2s;
-            margin-bottom: 32px;
-        }
-        .login-btn:hover { border-color: var(--border-hover); background: var(--bg-tertiary); transform: translateY(-1px); }
-        .login-btn svg { width: 20px; height: 20px; }
-        .features-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; max-width: 480px; margin-bottom: 32px; }
-        @media (max-width: 500px) { .features-grid { grid-template-columns: 1fr; } }
-        .feature-item {
-            display: flex;
-            align-items: flex-start;
-            gap: 10px;
-            text-align: left;
-            padding: 14px 16px;
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-        }
-        .feature-icon { font-size: 18px; flex-shrink: 0; }
-        .feature-text h4 { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
-        .feature-text p { font-size: 12px; color: var(--text-tertiary); line-height: 1.4; }
-        .login-note { font-size: 12px; color: var(--text-tertiary); max-width: 400px; }
-        .user-menu { display: flex; align-items: center; gap: 12px; }
-        .user-avatar { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); }
-        .user-name { font-size: 13px; color: var(--text-secondary); }
-        .logout-btn { font-size: 12px; color: var(--text-tertiary); cursor: pointer; text-decoration: none; }
-        .logout-btn:hover { color: var(--text-primary); }
-        /* Site Footer */
-        .site-footer {
-            border-top: 1px solid var(--border);
-            padding: 20px 24px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 24px;
-            font-size: 12px;
-            color: var(--text-tertiary);
-            background: var(--bg-secondary);
-        }
-        .site-footer a { color: var(--text-tertiary); text-decoration: none; transition: color 0.15s; }
-        .site-footer a:hover { color: var(--text-primary); }
-        .footer-divider { color: var(--border); }
-    </style>
-</head>
-<body data-theme="dark">
-    <div class="toast-container" id="toasts"></div>
-    
-    <header class="header">
-        <div class="logo">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg>
-            YT Music Scrobbler
-        </div>
-        <div class="header-actions">
-            <div id="user-area"></div>
-            <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme">
-                <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                </svg>
-            </button>
-        </div>
-    </header>
-
-    <!-- Login Screen (shown by default until authenticated) -->
-    <div id="login-screen" class="login-screen" style="display: flex;">
-        <div class="login-hero">
-            <div class="login-logo">🎵</div>
-            <h1 class="login-title">YT Music Scrobbler</h1>
-            <p class="login-subtitle">
-                Automatically sync your YouTube Music listening history to Last.fm. 
-                Works across all your devices — Phone, PC, TV, Nest speakers, and more.
-            </p>
-        </div>
-        <a href="/auth/google" class="login-btn">
-            <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-            Sign in with Google
-        </a>
-        <div class="features-grid">
-            <div class="feature-item">
-                <span class="feature-icon">📱</span>
-                <div class="feature-text">
-                    <h4>Multi-Device</h4>
-                    <p>Scrobbles from any device you use</p>
-                </div>
-            </div>
-            <div class="feature-item">
-                <span class="feature-icon">⚡</span>
-                <div class="feature-text">
-                    <h4>Automatic Sync</h4>
-                    <p>Background sync every 5 minutes</p>
-                </div>
-            </div>
-            <div class="feature-item">
-                <span class="feature-icon">🔒</span>
-                <div class="feature-text">
-                    <h4>Secure Storage</h4>
-                    <p>Your data stays safe and private</p>
-                </div>
-            </div>
-            <div class="feature-item">
-                <span class="feature-icon">🌐</span>
-                <div class="feature-text">
-                    <h4>Free & Open Source</h4>
-                    <p>MIT licensed, community driven</p>
-                </div>
-            </div>
-        </div>
-        <p class="login-note">
-            Free to use • No tracking • Your credentials are never shared
-        </p>
-    </div>
-
-    <main id="main-app" class="container" style="display: none;">
-        <h1>YT Music → Last.fm</h1>
-        <p class="subtitle">Scrobble your YouTube Music history automatically</p>
-
-        <div class="tabs">
-            <div class="tab active" onclick="showTab('dashboard')">Dashboard</div>
-            <div class="tab" onclick="showTab('connect')">Connect</div>
-            <div class="tab" onclick="showTab('history')">History</div>
-        </div>
-
-        <div id="dashboard" class="tab-content active">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">Connections</span>
-                    <button class="btn btn-secondary btn-sm" onclick="checkStatus()">Refresh</button>
-                </div>
-                <div class="card-body">
-                <div class="status-item">
-                    <div class="status-left">
-                        <div class="status-icon lastfm">L</div>
-                        <div class="status-name">Last.fm</div>
-                    </div>
-                    <div id="lastfm-status" class="status-badge offline">
-                        <span class="dot"></span> Offline
-                    </div>
-                </div>
-                <div class="status-item">
-                    <div class="status-left">
-                        <div class="status-icon ytmusic">Y</div>
-                        <div class="status-name">YouTube Music</div>
-                    </div>
-                    <div id="ytmusic-status" class="status-badge offline">
-                        <span class="dot"></span> Offline
-                    </div>
-                </div>
-                <div id="sync-info" class="sync-info">Waiting for sync...</div>
-            </div>
-        </div>
-
-            <div class="card">
-                <div class="card-header"><span class="card-title">Auto Scrobble</span></div>
-                <div class="card-body">
-                    <div class="toggle-row">
-                        <div class="toggle-info">
-                            <h3>Enable Auto Scrobble</h3>
-                            <p>Automatically check for new tracks</p>
-                        </div>
-                        <div class="toggle" id="auto-toggle" onclick="toggleAuto()"></div>
-                    </div>
-                    <div class="toggle-row">
-                        <div class="toggle-info">
-                            <h3>Sync Interval</h3>
-                            <p>Checks every 5 minutes (server cron)</p>
-                        </div>
-                        <span style="color:var(--text-secondary);font-size:14px;">5 min</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><span class="card-title">Actions</span></div>
-                <div class="card-body">
-                    <div class="btn-group">
-                        <button class="btn btn-primary" onclick="scrobbleNow()">Scrobble Now</button>
-                        <button class="btn btn-secondary" onclick="showTab('history'); loadHistory();">View History</button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><span class="card-title">Activity</span></div>
-                <div class="card-body">
-                    <div class="log" id="log">
-                        <div class="log-entry"><span class="time">[--:--]</span> Ready</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div id="connect" class="tab-content">
-            <div class="card">
-                <div class="card-header"><span class="card-title">Last.fm</span></div>
-                <div class="card-body">
-                    <div class="form-group">
-                        <label class="form-label">API Key</label>
-                        <input type="text" class="form-input" id="lastfm-key" placeholder="32-character API key">
-                        <p class="form-hint">Get from <a href="https://www.last.fm/api/account/create" target="_blank">last.fm/api</a></p>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">API Secret</label>
-                        <input type="password" class="form-input" id="lastfm-secret" placeholder="32-character secret">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Session Key</label>
-                        <input type="text" class="form-input" id="lastfm-session" placeholder="Generated after authorization">
-                        <p class="form-hint"><a href="#" onclick="authorizeLastfm(); return false;">Click to authorize with Last.fm</a></p>
-                    </div>
-                    <button class="btn btn-primary" onclick="saveLastfm()">Save</button>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header"><span class="card-title">YouTube Music</span></div>
-                <div class="card-body">
-                    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">Connect your account by pasting your browser headers. This allows the scrobbler to see what you listen to on **any device** (Phone, PC, TV) via your Watch History.</p>
-                    
-                    <div id="method-headers">
-                        <div class="form-group">
-                            <label class="form-label">Browser Headers</label>
-                            <textarea class="form-input" id="yt-headers" placeholder="Paste headers here..." rows="4" style="font-family:monospace;font-size:11px;"></textarea>
-                            <p class="form-hint">Copy from Network tab. <a href="https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html" target="_blank">Instructions</a></p>
-                        </div>
-                        <button class="btn btn-primary" onclick="saveYTHeaders()">Connect with Headers</button>
-                    </div>
-                    
-                    <button class="btn btn-secondary" onclick="disconnectYT()" id="disconnect-btn" style="display:none;margin-top:8px;">Disconnect</button>
-                    
-                    <p class="form-hint" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:6px;">
-                        Make sure YouTube watch history is enabled. <a href="https://myactivity.google.com/activitycontrols" target="_blank">Check settings</a>
-                    </p>
-                </div>
-            </div>
-        </div>
-
-        <div id="history" class="tab-content">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">Recent History</span>
-                    <button class="btn btn-secondary btn-sm" onclick="loadHistory()">Refresh</button>
-                </div>
-                <div class="card-body">
-                    <div id="history-list">
-                        <div class="empty">Click Refresh to load history</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </main>
-
-    <footer class="footer">
-        © <span id="year"></span> <a href="https://kuberbassi.com" target="_blank">Kuber Bassi</a>
-        <span style="margin:0 8px;">·</span>
-        <a href="/terms">Terms</a>
-        <span style="margin:0 8px;">·</span>
-        <a href="/privacy">Privacy</a>
-    </footer>
-    <script src="/_vercel/insights/script.js" defer></script>
-
-    <script>
-        document.getElementById('year').textContent = new Date().getFullYear();
-
-        // Toast notification system
-        function toast(msg, type = 'success') {
-            const container = document.getElementById('toasts');
-            const toastEl = document.createElement('div');
-            toastEl.className = `toast ${type}`;
-            toastEl.innerHTML = `<span class="toast-dot"></span>${msg}`;
-            container.appendChild(toastEl);
-            requestAnimationFrame(() => toastEl.classList.add('show'));
-            setTimeout(() => { 
-                toastEl.classList.remove('show'); 
-                setTimeout(() => toastEl.remove(), 200); 
-            }, 3000);
-        }
-
-        // Theme
-        function toggleTheme() {
-            const isLight = document.body.getAttribute('data-theme') === 'light';
-            document.body.setAttribute('data-theme', isLight ? 'dark' : 'light');
-            document.getElementById('theme-icon').innerHTML = isLight 
-                ? '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'
-                : '<circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>';
-            localStorage.setItem('theme', isLight ? 'dark' : 'light');
-        }
-        if (localStorage.getItem('theme') === 'light') {
-            document.body.setAttribute('data-theme', 'light');
-            document.getElementById('theme-icon').innerHTML = '<circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>';
-        }
-
-        // Tabs
-        function showTab(id) {
-            document.querySelectorAll('.tab').forEach((t, i) => {
-                t.classList.toggle('active', (id === 'dashboard' && i === 0) || (id === 'connect' && i === 1) || (id === 'history' && i === 2));
-            });
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-        }
-
-        // Config
-        function getConfig() {
-            return {
-                lastfm: JSON.parse(localStorage.getItem('lastfm') || '{}'),
-                ytmusic: JSON.parse(localStorage.getItem('ytmusic') || '{}')
-            };
-        }
-
-        // Log
-        function log(msg) {
-            const l = document.getElementById('log');
-            const time = new Date().toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
-            l.innerHTML = `<div class="log-entry"><span class="time">[${time}]</span> ${msg}</div>` + l.innerHTML;
-        }
-
-        let lastSyncTimestamp = 0;
-        async function checkStatus() {
-            try {
-                const res = await fetch('/api/status', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(getConfig())
-                });
-                const data = await res.json();
-                
-                // Update Search Logs from Server
-                if (data.logs && data.logs.length > 0) {
-                    const l = document.getElementById('log');
-                    l.innerHTML = data.logs.map(entry => {
-                        const time = new Date(entry.time * 1000).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
-                        const statusClass = entry.status.includes('Error') ? 'error' : '';
-                        return `<div class="log-entry ${statusClass}">
-                            <span class="time">[${time}]</span> 
-                            <b>${entry.artist}</b> - ${entry.title} 
-                            &nbsp;<span style="font-size:10px;color:var(--text-tertiary);float:right;">${entry.status}</span>
-                        </div>`;
-                    }).join('');
-                }
-
-                if (data.last_sync > lastSyncTimestamp) {
-                    lastSyncTimestamp = data.last_sync;
-                    loadHistory();
-                }
-
-                // Update Status Badges
-                const lfm = document.getElementById('lastfm-status');
-                lfm.innerHTML = `<span class="dot"></span>${data.lastfm.connected ? 'Online' : 'Offline'}`;
-                lfm.className = `status-badge ${data.lastfm.connected ? 'online' : 'offline'}`;
-                
-                const ytm = document.getElementById('ytmusic-status');
-                ytm.innerHTML = `<span class="dot"></span>${data.ytmusic.connected ? 'Online' : 'Offline'}`;
-                ytm.className = `status-badge ${data.ytmusic.connected ? 'online' : 'offline'}`;
-
-                // Update Sync Info text
-                const syncInfo = document.getElementById('sync-info');
-                if (data.last_sync > 0) {
-                    const diff = Math.floor((data.now - data.last_sync) / 60);
-                    syncInfo.innerText = diff === 0 ? 'Synced just now' : `Synced ${diff}m ago`;
-                    syncInfo.className = 'sync-info active';
-                } else {
-                    syncInfo.innerText = 'Waiting for first sync...';
-                    syncInfo.className = 'sync-info';
-                }
-            } catch (e) { console.error('Status check failed', e); }
-        }
-
-        // Save Last.fm
-        async function saveLastfm() {
-            const config = {
-                api_key: document.getElementById('lastfm-key').value.trim(),
-                api_secret: document.getElementById('lastfm-secret').value.trim(),
-                session_key: document.getElementById('lastfm-session').value.trim()
-            };
-            if (!config.api_key || !config.api_secret) return toast('Enter API key and secret', 'error');
-            localStorage.setItem('lastfm', JSON.stringify(config));
-            
-            // Sync with Server
-            await saveConfigToServer();
-            
-            toast('Last.fm saved');
-            log('Last.fm saved');
-            checkStatus();
-        }
-
-        
-        // Disconnect YouTube Music
-        async function disconnectYT() {
-            localStorage.removeItem('yt_headers');
-            localStorage.removeItem('ytmusic');
-            
-            // Explicitly clear ytmusic from the server DB
-            try {
-                await fetch('/api/config', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ytmusic: {headers: null}})
-                });
-            } catch (e) { console.error("Failed to clear YT config on server", e); }
-            
-            toast('Disconnected from YouTube', 'info');
-            log('Disconnected');
-            checkStatus();
-            updateYTState();
-        }
-
-        // Save Browser Headers
-        async function saveYTHeaders() {
-            const headers = document.getElementById('yt-headers').value.trim();
-            if (!headers) return toast('Paste headers first', 'error');
-            
-            localStorage.setItem('yt_headers', headers);
-            localStorage.setItem('ytmusic', JSON.stringify({headers: headers}));
-            
-            // Sync with Server
-            await saveConfigToServer();
-            
-            toast('Headers connected!');
-            log('YouTube Music connected');
-            
-            // Instant State Update
-            updateYTState();
-            checkStatus();
-            setTimeout(loadHistory, 300); // Quick refresh after status
-        }
-
-        // Update YouTube UI State
-        function updateYTState() {
-            const headers = localStorage.getItem('yt_headers');
-            const disconnectBtn = document.getElementById('disconnect-btn');
-            const headerSection = document.getElementById('method-headers');
-            
-            if (headers) {
-                disconnectBtn.style.display = 'inline-flex';
-                headerSection.style.display = 'none';
-            } else {
-                disconnectBtn.style.display = 'none';
-                headerSection.style.display = 'block';
-            }
-        }
-
-        // Last.fm Auth
-        function authorizeLastfm() {
-            const key = document.getElementById('lastfm-key').value.trim();
-            if (!key) return toast('Enter API key first', 'error');
-            const cb = encodeURIComponent(window.location.origin + '/api/lastfm-callback');
-            window.open(`https://www.last.fm/api/auth/?api_key=${key}&cb=${cb}`, 'lastfm', 'width=500,height=600');
-        }
-
-        window.addEventListener('message', async (e) => {
-            if (e.data.type === 'lastfm-token') {
-                const key = document.getElementById('lastfm-key').value.trim();
-                const secret = document.getElementById('lastfm-secret').value.trim();
-                try {
-                    const res = await fetch('/api/lastfm-session', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({api_key: key, api_secret: secret, token: e.data.token})
-                    });
-                    const data = await res.json();
-                    if (data.session_key) {
-                        document.getElementById('lastfm-session').value = data.session_key;
-                        toast('Authorized as ' + data.username);
-                        log('Last.fm: ' + data.username);
-                    } else toast(data.error || 'Failed', 'error');
-                } catch { toast('Auth failed', 'error'); }
-            }
-        });
-
-        // Scrobble — one-by-one badge animation
-        async function scrobbleNow() {
-            const btn = document.querySelector('button[onclick="scrobbleNow()"]');
-            const list = document.getElementById('history-list');
-            if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
-            log('Syncing…');
-            try {
-                const res = await fetch('/api/scrobble', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(getConfig())
-                });
-                const data = await res.json();
-                if (data.success) {
-                    if (data.count === 0) {
-                        toast('Nothing new to scrobble');
-                        log('Already up to date');
-                    } else {
-                        toast(`Scrobbled ${data.count} track${data.count !== 1 ? 's' : ''}`);
-                        log(`Done — ${data.count} scrobbled`);
-                        // Animate badges appearing one by one for each newly scrobbled track
-                        for (const vid of (data.scrobbled_video_ids || [])) {
-                            const el = list.querySelector(`.track[data-video-id="${vid}"]`);
-                            if (el && !el.querySelector('.track-badge.done')) {
-                                const badge = document.createElement('span');
-                                badge.className = 'track-badge done';
-                                badge.textContent = 'Scrobbled';
-                                badge.style.cssText = 'opacity:0;transition:opacity 0.35s ease';
-                                el.appendChild(badge);
-                                // Trigger fade-in on next frame
-                                requestAnimationFrame(() => requestAnimationFrame(() => { badge.style.opacity = '1'; }));
-                                await new Promise(r => setTimeout(r, 280));
-                            }
-                        }
-                    }
-                    // Refresh so DB state is reflected accurately
-                    loadHistory();
-                } else {
-                    toast(data.error || 'Failed', 'error');
-                    log('Error: ' + (data.error || 'Failed'));
-                }
-            } catch (e) { toast('Error', 'error'); log('Error'); }
-            finally {
-                if (btn) { btn.disabled = false; btn.textContent = 'Scrobble Now'; }
-            }
-        }
-
-        // History
-        async function loadHistory() {
-            const list = document.getElementById('history-list');
-            list.innerHTML = '<div class="empty">Loading...</div>';
-            try {
-                const res = await fetch('/api/history', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(getConfig())
-                });
-                const data = await res.json();
-                if (data.error) return list.innerHTML = `<div class="empty">${data.error}</div>`;
-                if (!data.tracks?.length) return list.innerHTML = '<div class="empty">No history</div>';
-                const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-                list.innerHTML = data.tracks.map(t => `
-                    <div class="track" data-video-id="${esc(t.videoId)}">
-                        <div class="track-info">
-                            <h4>${esc(t.title)}</h4>
-                            <p>${esc(t.artist)}</p>
-                        </div>
-                        ${t.scrobbled ? '<span class="track-badge done">Scrobbled</span>' : ''}
-                    </div>
-                `).join('');
-            } catch { list.innerHTML = '<div class="empty">Error</div>'; }
-        }
-
-        // Auto scrobble (Now purely UI toggle for server-side worker)
-        async function toggleAuto() {
-            const toggle = document.getElementById('auto-toggle');
-            const isEnabled = !toggle.classList.contains('active');
-            
-            if (isEnabled) {
-                toggle.classList.add('active');
-                localStorage.setItem('autoScrobble', 'true');
-                log('Auto Sync Server: ON');
-                toast('Server Auto Scrobble ON');
-            } else {
-                toggle.classList.remove('active');
-                localStorage.setItem('autoScrobble', 'false');
-                log('Auto Sync Server: OFF');
-                toast('Server Auto Scrobble OFF', 'info');
-            }
-            
-            await saveConfigToServer();
-        }
-
-        // Interval is fixed at 5 minutes (server cron)
-
-        // Server Config Sync
-        async function saveConfigToServer() {
-            const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
-            const yt_headers = localStorage.getItem('yt_headers');
-            const auto_scrobble = localStorage.getItem('autoScrobble') === 'true';
-            
-            const config = {
-                lastfm: lastfm,
-                // Only include ytmusic if headers are actually set — avoids
-                // overwriting valid DB config with null on a fresh browser.
-                ...(yt_headers ? {ytmusic: {headers: yt_headers}} : {}),
-                auto_scrobble: auto_scrobble,
-                interval: 300  // Fixed 5 min (server cron)
-            };
-            
-            try {
-                await fetch('/api/config', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(config)
-                });
-            } catch (e) { console.error("Sync to server failed", e); }
-        }
-
-        // Load config
-        async function loadConfig() {
-            // Priority 1: Load from Server
-            try {
-                const res = await fetch('/api/config');
-                const config = await res.json();
-                
-                if (config.lastfm) {
-                    localStorage.setItem('lastfm', JSON.stringify(config.lastfm));
-                    document.getElementById('lastfm-key').value = config.lastfm.api_key || '';
-                    document.getElementById('lastfm-secret').value = config.lastfm.api_secret || '';
-                    document.getElementById('lastfm-session').value = config.lastfm.session_key || '';
-                }
-                
-                if (config.ytmusic?.headers) {
-                    localStorage.setItem('yt_headers', config.ytmusic.headers);
-                    // Also set 'ytmusic' key so getConfig() reads it correctly on reload
-                    localStorage.setItem('ytmusic', JSON.stringify({headers: config.ytmusic.headers}));
-                    document.getElementById('yt-headers').value = config.ytmusic.headers;
-                }
-                
-                // Interval is fixed at 5 min (server cron)
-                
-                if (config.auto_scrobble !== undefined) {
-                    localStorage.setItem('autoScrobble', config.auto_scrobble ? 'true' : 'false');
-                    document.getElementById('auto-toggle').classList.toggle('active', config.auto_scrobble);
-                }
-            } catch (e) {
-                console.error("Failed to load server config, falling back to local", e);
-                // Fallback to local if server fails
-                const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
-                const interval = localStorage.getItem('interval');
-                const yt_headers = localStorage.getItem('yt_headers');
-                const autoEnabled = localStorage.getItem('autoScrobble') === 'true';
-                
-                if (lastfm.api_key) document.getElementById('lastfm-key').value = lastfm.api_key;
-                if (lastfm.api_secret) document.getElementById('lastfm-secret').value = lastfm.api_secret;
-                if (lastfm.session_key) document.getElementById('lastfm-session').value = lastfm.session_key;
-                if (yt_headers) document.getElementById('yt-headers').value = yt_headers;
-                if (autoEnabled) document.getElementById('auto-toggle').classList.add('active');
-            }
-            
-            updateYTState();
-        }
-
-        // Check login state and show appropriate screen
-        let currentUser = null;
-        async function checkLoginState() {
-            try {
-                const res = await fetch('/api/user');
-                const data = await res.json();
-                
-                const loginScreen = document.getElementById('login-screen');
-                const mainApp = document.getElementById('main-app');
-                const userArea = document.getElementById('user-area');
-                
-                // Check URL for error
-                const urlParams = new URLSearchParams(window.location.search);
-                const errorMsg = urlParams.get('error');
-                if (errorMsg) {
-                    toast(errorMsg, 'error');
-                    window.history.replaceState({}, '', '/');
-                }
-                
-                if (data.logged_in) {
-                    currentUser = data.user;
-                    loginScreen.style.display = 'none';
-                    mainApp.style.display = 'block';
-                    userArea.innerHTML = `
-                        <div class="user-menu">
-                            <img class="user-avatar" src="${data.user.picture || ''}" alt="">
-                            <span class="user-name">${data.user.name || data.user.email}</span>
-                            <a href="/auth/logout" class="logout-btn">Logout</a>
-                        </div>
-                    `;
-                } else {
-                    // Not logged in - show login screen
-                    loginScreen.style.display = 'flex';
-                    mainApp.style.display = 'none';
-                }
-            } catch (e) {
-                // On error, show login screen
-                document.getElementById('login-screen').style.display = 'flex';
-                document.getElementById('main-app').style.display = 'none';
-            }
-        }
-        
-        // Clean up legacy URL params
-        localStorage.removeItem('guestMode'); // Clear any old guest mode
-        const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.get('google_auth')) {
-            window.history.replaceState({}, '', '/');
-        }
-
-        // Initialize
-        checkLoginState().then(() => {
-            if (document.getElementById('main-app').style.display !== 'none') {
-                loadConfig();
-                checkStatus();
-                loadHistory();
-            }
-        });
-        
-        // Poll status for real-time updates
-        setInterval(() => {
-            if (document.getElementById('main-app').style.display !== 'none') {
-                checkStatus();
-            }
-        }, 5000);
-        
-        // Real-time history refresh every 10 seconds when on history tab
-        setInterval(() => {
-            if (document.getElementById('history').classList.contains('active')) {
-                loadHistory();
-            }
-        }, 10000);
-    </script>
-</body>
-</html>
-'''
-
 # Scrobble tracking handled by persistent scrobbled.json
 
 
@@ -1654,7 +648,7 @@ def get_ytmusic_client(config):
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template('index.html')
 
 @app.route('/robots.txt')
 def robots():
@@ -1670,365 +664,29 @@ def sitemap():
 </urlset>''', 200, {'Content-Type': 'application/xml'}
 
 
-# --- Terms and Privacy Pages (Vercel-style premium design) ---
-
-LEGAL_PAGE_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title} - YT Music Scrobbler</title>
-    <meta name="description" content="{meta_description}">
-    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com{path}">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root {{
-            --bg-primary: #000;
-            --bg-secondary: #0a0a0a;
-            --bg-elevated: #111;
-            --border: #262626;
-            --text-primary: #fafafa;
-            --text-secondary: #a1a1a1;
-            --text-tertiary: #737373;
-            --accent: #3b82f6;
-        }}
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-            -webkit-font-smoothing: antialiased;
-            line-height: 1.6;
-        }}
-        .header {{
-            border-bottom: 1px solid var(--border);
-            padding: 0 24px;
-            height: 56px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: var(--bg-secondary);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }}
-        .logo {{
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-weight: 600;
-            font-size: 14px;
-            color: var(--text-primary);
-            text-decoration: none;
-        }}
-        .logo svg {{ width: 22px; height: 22px; }}
-        .back-link {{
-            color: var(--text-tertiary);
-            text-decoration: none;
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            transition: color 0.15s;
-        }}
-        .back-link:hover {{ color: var(--text-primary); }}
-        .container {{
-            max-width: 680px;
-            margin: 0 auto;
-            padding: 48px 24px 80px;
-        }}
-        .page-header {{
-            margin-bottom: 40px;
-            padding-bottom: 24px;
-            border-bottom: 1px solid var(--border);
-        }}
-        h1 {{
-            font-size: 28px;
-            font-weight: 700;
-            letter-spacing: -0.5px;
-            margin-bottom: 8px;
-        }}
-        .last-updated {{
-            font-size: 13px;
-            color: var(--text-tertiary);
-        }}
-        .section {{
-            margin-bottom: 32px;
-        }}
-        .section-title {{
-            font-size: 15px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: var(--text-primary);
-        }}
-        .section-content {{
-            font-size: 14px;
-            color: var(--text-secondary);
-        }}
-        .section-content p {{
-            margin-bottom: 12px;
-        }}
-        .section-content ul {{
-            padding-left: 20px;
-            margin-top: 8px;
-        }}
-        .section-content li {{
-            margin-bottom: 8px;
-            color: var(--text-secondary);
-        }}
-        .section-content li::marker {{
-            color: var(--text-tertiary);
-        }}
-        .highlight-box {{
-            background: var(--bg-elevated);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px 18px;
-            margin: 16px 0;
-            font-size: 13px;
-        }}
-        .highlight-box strong {{
-            color: var(--text-primary);
-        }}
-        a {{
-            color: var(--accent);
-            text-decoration: none;
-        }}
-        a:hover {{
-            text-decoration: underline;
-        }}
-        .footer {{
-            border-top: 1px solid var(--border);
-            padding: 24px;
-            text-align: center;
-            font-size: 12px;
-            color: var(--text-tertiary);
-            background: var(--bg-secondary);
-        }}
-        .footer a {{
-            color: var(--text-tertiary);
-            margin: 0 12px;
-        }}
-        .footer a:hover {{
-            color: var(--text-primary);
-            text-decoration: none;
-        }}
-    </style>
-</head>
-<body>
-    <header class="header">
-        <a href="/" class="logo">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg>
-            YT Music Scrobbler
-        </a>
-        <a href="/" class="back-link">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-            Back to Home
-        </a>
-    </header>
-    <main class="container">
-        <div class="page-header">
-            <h1>{title}</h1>
-            <p class="last-updated">Last updated: <span id="last-updated-year"></span></p>
-        </div>
-        {content}
-    </main>
-    <footer class="footer">
-        <span>© <span id="footer-year"></span> YT Music Scrobbler</span>
-        <a href="/terms">Terms</a>
-        <a href="/privacy">Privacy</a>
-        <a href="https://github.com/kuberbassi/ytmusic-scrobbler" target="_blank">GitHub</a>
-    </footer>
-    <script>
-        const year = new Date().getFullYear();
-        document.getElementById('footer-year').textContent = year;
-        const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-        document.getElementById('last-updated-year').textContent = months[new Date().getMonth()] + ' ' + year;
-    </script>
-</body>
-</html>
-'''
+# Terms and Privacy routes use templates/legal.html
 
 @app.route('/terms')
 def terms():
     content = '''
-        <div class="section">
-            <h2 class="section-title">1. Service Description</h2>
-            <div class="section-content">
-                <p>YT Music Scrobbler is a free service that automatically syncs your YouTube Music listening history to Last.fm. To use this service, you must:</p>
-                <ul>
-                    <li>Sign in with a valid Google account</li>
-                    <li>Connect your Last.fm account</li>
-                    <li>Provide YT Music browser headers for authentication</li>
-                </ul>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">2. Account & Data</h2>
-            <div class="section-content">
-                <p>Your Google ID, email, name, and profile picture are stored securely in our database (Supabase). Last.fm credentials and YT Music headers are stored per-user.</p>
-                <div class="highlight-box">
-                    <strong>Important:</strong> Your credentials are never shared or sold to third parties and are only used to provide the scrobbling service.
-                </div>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">3. Acceptable Use</h2>
-            <div class="section-content">
-                <p>You agree not to:</p>
-                <ul>
-                    <li>Abuse the service or attempt to bypass rate limits</li>
-                    <li>Use the service for unauthorized or illegal activities</li>
-                    <li>Attempt to access other users' data</li>
-                </ul>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">4. Service Availability</h2>
-            <div class="section-content">
-                <p>The service is provided "as is" with no guarantees of uptime or data retention. We reserve the right to modify or discontinue the service at any time. We may suspend or terminate your access if you violate these terms.</p>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">5. Changes & Contact</h2>
-            <div class="section-content">
-                <p>These terms may be updated at any time. Continued use after changes constitutes acceptance. For questions or data deletion requests, contact us at <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
-            </div>
-        </div>
+        <p><strong>1. Service Description:</strong> YT Music Scrobbler automatically syncs your YouTube Music listening history to Last.fm across all your devices.</p>
+        <p><strong>2. Account & Data:</strong> Your credentials and listening history are stored securely per-user in Supabase and are never shared or sold.</p>
+        <p><strong>3. Acceptable Use:</strong> You agree not to abuse the service, bypass rate limits, or attempt unauthorized data access.</p>
+        <p><strong>4. Availability:</strong> The service is provided "as is" with no uptime guarantees.</p>
+        <p><strong>5. Contact:</strong> For inquiries or data deletion, contact <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
     '''
-    return render_template_string(LEGAL_PAGE_TEMPLATE.format(
-        title="Terms of Service",
-        meta_description="Terms of Service for YT Music Scrobbler - automatic YouTube Music to Last.fm scrobbling service",
-        path="/terms",
-        content=content
-    ))
+    return render_template('legal.html', title="Terms of Service", path="/terms", content=content)
 
 
 @app.route('/privacy')
 def privacy():
     content = '''
-        <div class="section">
-            <h2 class="section-title">1. Information We Collect</h2>
-            <div class="section-content">
-                <p>We collect the following information to provide our service:</p>
-                <ul>
-                    <li><strong>Google account info</strong> (ID, email, name, picture) via OAuth for authentication</li>
-                    <li><strong>Last.fm API credentials</strong> and <strong>YT Music browser headers</strong> to enable scrobbling</li>
-                    <li><strong>Scrobble history</strong> and sync logs, stored per-user</li>
-                    <li><strong>IP address</strong> and request metadata for rate limiting and security</li>
-                </ul>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">2. How We Use Your Data</h2>
-            <div class="section-content">
-                <ul>
-                    <li>To authenticate you and provide the scrobbling service</li>
-                    <li>To sync your YouTube Music history to your Last.fm account</li>
-                    <li>To enforce rate limits and protect against abuse</li>
-                </ul>
-                <div class="highlight-box">
-                    <strong>Your credentials are never shared or sold.</strong> They are stored per-user in Supabase and are not accessible to the service operator except as required for the service to function.
-                </div>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">3. Data Storage & Security</h2>
-            <div class="section-content">
-                <p>All user data is stored securely in Supabase (PostgreSQL). We use HTTPS, secure storage, and security headers. No cookies are used for tracking; Flask sessions are used for login state only.</p>
-                <p>No analytics or ad networks are used. Vercel Insights may collect basic serverless usage data for operational monitoring only.</p>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">4. Data Deletion</h2>
-            <div class="section-content">
-                <p>You may request deletion of your account and all associated data at any time by contacting us at <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2 class="section-title">5. Policy Updates</h2>
-            <div class="section-content">
-                <p>This policy may be updated. Continued use after changes constitutes acceptance. For privacy questions, contact us at <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
-            </div>
-        </div>
+        <p><strong>1. Information We Collect:</strong> Google profile info via OAuth, Last.fm credentials, YT Music browser headers, and scrobble logs.</p>
+        <p><strong>2. How We Use Data:</strong> Exclusively to authenticate you and sync your music history to Last.fm.</p>
+        <p><strong>3. Data Security:</strong> Secured with PostgreSQL Row-Level Security, HTTPS, and session hardening.</p>
+        <p><strong>4. Deletion:</strong> You can request full data deletion at any time.</p>
     '''
-    return render_template_string(LEGAL_PAGE_TEMPLATE.format(
-        title="Privacy Policy",
-        meta_description="Privacy Policy for YT Music Scrobbler - learn how we handle your data",
-        path="/privacy",
-        content=content
-    ))
-
-
-@app.route('/api/health')
-def health_check():
-    """Health check endpoint for monitoring"""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': int(time.time()),
-        'version': '2.0.0',
-        'multi_user': is_multi_user_enabled()
-    })
-
-
-@app.route('/api/stats')
-def get_stats():
-    """Public stats endpoint (no sensitive data)"""
-    stats = {
-        'active_users': 0,
-        'last_sync': last_sync_time,
-        'uptime': 'ok'
-    }
-    
-    if is_multi_user_enabled():
-        try:
-            stats['active_users'] = get_active_users_count()
-        except:
-            pass
-    
-    return jsonify(stats)
-
-
-# Simple page template
-SIMPLE_PAGE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title} - YT Scrobbler</title>
-    <link rel="canonical" href="https://ytscrobbler.kuberbassi.com{path}">
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #000; color: #fafafa; line-height: 1.6; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 48px 24px; }}
-        h1 {{ font-size: 24px; margin-bottom: 24px; }}
-        p {{ color: #a1a1aa; margin-bottom: 16px; }}
-        a {{ color: #fafafa; }}
-        .back {{ margin-top: 32px; display: inline-block; color: #71717a; text-decoration: none; }}
-        .back:hover {{ color: #fafafa; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>{title}</h1>
-        {content}
-        <a class="back" href="/">← Back</a>
-    </div>
-    <script src="/_vercel/insights/script.js" defer></script>
-</body>
-</html>
-'''
+    return render_template('legal.html', title="Privacy Policy", path="/privacy", content=content)
 
 
 # =============================================================================
@@ -2236,22 +894,33 @@ def history():
         username = google_user.get('email', 'unknown')
 
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
-        # DB is the source of truth — entries are only written here AFTER a
-        # successful Last.fm scrobble, so this is accurate and fast.
-        db_scrobbled, _ = data_store.get_scrobble_history()
+        db_scrobbled, track_meta_map = data_store.get_scrobble_history()
 
-        yt_history = ytmusic.get_history()
+        try:
+            yt_history = ytmusic.get_history()
+        except Exception as e:
+            return jsonify({'error': 'YouTube Music session expired. Please re-paste headers in Accounts.'})
 
         tracks = []
         for item in yt_history[:30]:
+            if not is_music_content(item):
+                continue
             title = item.get('title', 'Unknown')
-            artist = item.get('artists', [{}])[0].get('name', 'Unknown')
+            artists = item.get('artists', [])
+            artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
+            if not artist or artist == 'Unknown':
+                if item.get('author'):
+                    artist = item.get('author')
+                elif item.get('artist'):
+                    artist = item.get('artist')
+            
+            clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
             video_id = item.get('videoId')
-            track_uids = generate_track_uids(title, artist, video_id)
-            is_scrobbled = any(uid in db_scrobbled for uid in track_uids)
+            track_uids = generate_track_uids(title, clean_artist, video_id)
+            is_scrobbled, _ = is_track_scrobbled(track_uids, track_meta_map, data_store)
             tracks.append({
                 'title': title,
-                'artist': artist,
+                'artist': clean_artist,
                 'album': item.get('album', {}).get('name', '') if item.get('album') else '',
                 'videoId': video_id or 'no-id',
                 'scrobbled': is_scrobbled
@@ -2260,6 +929,92 @@ def history():
         return jsonify({'tracks': tracks})
     except Exception as e:
         return jsonify({'error': str(e)})
+
+
+@app.route('/api/scrobble-single', methods=['POST'])
+@rate_limit('scrobble')
+def scrobble_single():
+    data = request.json or {}
+    artist = data.get('artist')
+    title = data.get('title')
+    album = data.get('album', '')
+    video_id = data.get('videoId')
+
+    if not artist or not title:
+        return jsonify({'success': False, 'error': 'Artist and title required'}), 400
+
+    user_id = session.get('user_id')
+    google_user = session.get('google_user', {})
+    username = google_user.get('email', 'unknown')
+    config = _enrich_config_from_db(data, user_id)
+
+    network, lastfm_error = get_lastfm_network(config)
+    if not network:
+        return jsonify({'success': False, 'error': lastfm_error or 'Last.fm not configured'})
+
+    clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
+    clean_title = strip_title_variants(title)
+    scrobble_title = clean_title if clean_title else title
+    current_time = int(time.time())
+
+    try:
+        with scrobble_lock:
+            network.scrobble(
+                artist=clean_artist,
+                title=scrobble_title,
+                timestamp=current_time,
+                album=album if album else None
+            )
+            data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+            track_uids = generate_track_uids(title, clean_artist, video_id)
+            scrobble_meta = {
+                'timestamp': current_time,
+                'track_title': scrobble_title,
+                'artist': clean_artist
+            }
+            for uid in track_uids:
+                data_store.save_scrobble(uid, scrobble_meta)
+                data_store.mark_session_scrobbled(uid)
+                global_scrobble_session_cache[uid] = current_time
+            
+            add_sync_log(clean_artist, scrobble_title, status="Single Scrobble", user=username)
+            return jsonify({'success': True, 'artist': clean_artist, 'title': scrobble_title, 'video_id': video_id})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/reset-history', methods=['POST'])
+def reset_history():
+    user_id = session.get('user_id')
+    google_user = session.get('google_user', {})
+    username = google_user.get('email', 'unknown')
+    
+    try:
+        data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+        data_store.clear_session()
+        global_scrobble_session_cache.clear()
+        
+        if data_store.is_multi_user and user_id:
+            try:
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/scrobbles",
+                    params={'user_id': f'eq.{user_id}'},
+                    headers=get_headers(),
+                    timeout=10
+                )
+            except Exception as e:
+                print(f"[WARN] Reset scrobbles DB delete failed: {e}")
+        else:
+            store = get_file_storage()
+            try:
+                if os.path.exists(store.scrobbled_file):
+                    os.remove(store.scrobbled_file)
+            except Exception as e:
+                print(f"[WARN] Reset scrobbles file delete failed: {e}")
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/api/scrobble', methods=['POST'])
@@ -2271,8 +1026,6 @@ def scrobble():
     if is_multi_user_enabled() and not session.get('logged_in'):
         return jsonify({'success': False, 'error': 'Not logged in'}), 401
 
-    # Resolve user identity early so we can fall back to DB credentials when
-    # the client's localStorage is stale or empty (e.g. after clearing storage).
     user_id = session.get('user_id')
     google_user = session.get('google_user', {})
     username = google_user.get('email', 'unknown')
@@ -2291,38 +1044,24 @@ def scrobble():
         if not ytmusic:
             return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
 
-        # DISTRIBUTED SYNC LOCK: Update last_sync_at NOW (before any work) so other
-        # concurrent Vercel instances see this user as "busy" and skip them.
-        # get_all_active_users() filters users synced in the last 4 min, so this
-        # acts as a cross-instance mutex without needing Redis or a real lock.
         if user_id:
             update_user_last_sync(user_id)
 
-        # Create data store (uses DB if multi-user, else file)
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
         data_store.clear_session()
         
-        # Load scrobble history
         scrobbled_tracks, track_meta_map = data_store.get_scrobble_history()
         
-        # Sync with Last.fm to seed our DB with tracks already scrobbled anywhere.
-        # Fetch 200 tracks so old/historical listens are covered.
-        # IMPORTANT: Directly update track_meta_map[uid] after every save so the
-        # local map never goes stale even when the DB call returns an empty set.
         try:
             authenticated_user = network.get_authenticated_user()
-            recent = network.get_user(authenticated_user).get_recent_tracks(limit=200)
+            recent = network.get_user(authenticated_user).get_recent_tracks(limit=15)
             lastfm_synced_count = 0
             for r in recent:
-                # Generate ALL possible UIDs for this track
                 track_uids = generate_track_uids(r.track.title, r.track.artist.name)
-                
-                # Check if ANY UID already exists
                 already_scrobbled, _ = is_track_scrobbled(track_uids, track_meta_map, data_store)
                 if already_scrobbled:
                     continue
                 
-                # Preserve the real Last.fm timestamp when available
                 try:
                     lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
                 except (TypeError, ValueError):
@@ -2333,86 +1072,95 @@ def scrobble():
                     'track_title': r.track.title,
                     'artist': r.track.artist.name
                 }
-                # Save ALL UIDs and immediately update local map so it stays
-                # accurate even if the DB call fails and returns set(), {}
                 for uid in track_uids:
                     data_store.save_scrobble(uid, meta)
-                    track_meta_map[uid] = meta  # Always update locally
+                    track_meta_map[uid] = meta
                 lastfm_synced_count += 1
             if lastfm_synced_count > 0:
                 print(f"[INFO] Synced {lastfm_synced_count} tracks from Last.fm history")
         except Exception as e:
             print(f"[WARN] Last.fm sync check failed: {e} — relying on DB-only deduplication")
 
-        history = ytmusic.get_history()
+        try:
+            history = ytmusic.get_history()
+        except Exception as e:
+            err_str = str(e)
+            return jsonify({'success': False, 'error': 'YouTube Music session expired. Please re-paste headers in Accounts.'})
+
         if not history:
             return jsonify({'success': True, 'count': 0, 'message': 'No history found'})
         
         scrobbled_count = 0
-        scrobbled_video_ids = []  # Returned to frontend for instant badge update
+        scrobbled_video_ids = []
         current_time = int(time.time())
 
-        # Process history - limit to 30 for manual sync (was 20)
         for i, item in enumerate(history[:30]):
+            if not is_music_content(item):
+                continue
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
             artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
+            if not artist or artist == 'Unknown':
+                if item.get('author'):
+                    artist = item.get('author')
+                elif item.get('artist'):
+                    artist = item.get('artist')
+            
+            clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
             album = item.get('album', {}).get('name', '') if item.get('album') else ''
             video_id = item.get('videoId')
             
             if not video_id and title == 'Unknown':
                 continue
             
-            # Generate ALL possible UIDs for this track
-            track_uids = generate_track_uids(title, artist, video_id)
+            clean_title = strip_title_variants(title)
+            scrobble_title = clean_title if clean_title else title
             
-            # Check if ANY UID was already scrobbled - bulletproof deduplication
+            track_uids = generate_track_uids(title, clean_artist, video_id)
             already_scrobbled, matching_uid = is_track_scrobbled(track_uids, track_meta_map, data_store)
             
             if already_scrobbled:
                 print(f"[DEBUG] Skipping '{title}' - already_scrobbled (matched: {matching_uid})")
                 continue
             
-            print(f"[DEBUG] Scrobbling '{title}' - first_play")
+            print(f"[DEBUG] Scrobbling '{scrobble_title}' by '{clean_artist}' - first_play")
 
             try:
                 with scrobble_lock:
-                    timestamp = current_time - (i * 3)
+                    # Realistic 3-minute spacing per track backwards from current_time
+                    timestamp = current_time - (i * 180)
                     network.scrobble(
-                        artist=artist,
-                        title=title,
+                        artist=clean_artist,
+                        title=scrobble_title,
                         timestamp=timestamp,
                         album=album if album else None
                     )
                     scrobble_meta = {
                         'timestamp': timestamp,
-                        'track_title': title,
-                        'artist': artist
+                        'track_title': scrobble_title,
+                        'artist': clean_artist
                     }
-                    # Save to DB AND immediately update local map.
-                    # Updating track_meta_map directly here is critical:
-                    # save_scrobble() returns set(),{} on DB failure, which
-                    # would wipe out the map and cause a scrobble loop.
                     for uid in track_uids:
                         data_store.save_scrobble(uid, scrobble_meta)
-                        track_meta_map[uid] = scrobble_meta  # Always stays accurate
+                        data_store.mark_session_scrobbled(uid)
+                        track_meta_map[uid] = scrobble_meta
+                        global_scrobble_session_cache[uid] = current_time
                     if video_id:
-                        scrobbled_video_ids.append(video_id)  # For instant frontend badge
-                    add_sync_log(artist, title, user=username)
+                        scrobbled_video_ids.append(video_id)
+                    add_sync_log(clean_artist, scrobble_title, user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
                 print(f"[ERROR] Last.fm API error for '{title}': {e}")
-                add_sync_log(artist, title, status=f"API: {str(e)[:20]}", user=username)
+                add_sync_log(clean_artist, scrobble_title, status=f"API: {str(e)[:20]}", user=username)
             except Exception as e:
                 print(f"[ERROR] Scrobble failed for '{title}': {e}")
-                add_sync_log(artist, title, status=f"Err: {str(e)[:20]}", user=username)
+                add_sync_log(clean_artist, scrobble_title, status=f"Err: {str(e)[:20]}", user=username)
 
         status_msg = f"Scrobbled {scrobbled_count}" if scrobbled_count > 0 else "No new tracks"
         add_sync_log("System", status_msg, status="Done", user=username)
         global last_sync_time
         last_sync_time = int(time.time())
 
-        # Update last_sync_at in DB to prevent cron from double-syncing
         if user_id:
             update_user_last_sync(user_id)
 
@@ -2490,6 +1238,30 @@ class BackgroundScrobbler:
         data_store.clear_session()
         history_set, meta_map = data_store.get_scrobble_history()
         
+        # Seed local history from Last.fm recent tracks (up to 200 tracks)
+        try:
+            authenticated_user = network.get_authenticated_user()
+            recent = network.get_user(authenticated_user).get_recent_tracks(limit=200)
+            for r in recent:
+                track_uids = generate_track_uids(r.track.title, r.track.artist.name)
+                already_scrobbled, _ = is_track_scrobbled(track_uids, meta_map, data_store)
+                if already_scrobbled:
+                    continue
+                try:
+                    lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
+                except (TypeError, ValueError):
+                    lfm_ts = int(time.time())
+                meta = {
+                    'timestamp': lfm_ts,
+                    'track_title': r.track.title,
+                    'artist': r.track.artist.name
+                }
+                for uid in track_uids:
+                    data_store.save_scrobble(uid, meta)
+                    meta_map[uid] = meta
+        except Exception as e:
+            print(f"[BG] Last.fm sync check failed: {e} — relying on DB-only deduplication")
+
         try:
             history = ytmusic.get_history()
         except Exception as e:
@@ -2729,22 +1501,7 @@ def handle_config():
 def lastfm_callback():
     token = request.args.get('token')
     if token:
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head><title>Success</title></head>
-        <body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#000;color:#fff;">
-            <div style="text-align:center;">
-                <p style="font-size:24px;margin-bottom:8px;">✓</p>
-                <p>Authorized</p>
-            </div>
-            <script>
-                if (window.opener) window.opener.postMessage({{type:'lastfm-token',token:'{token}'}}, '*');
-                setTimeout(() => window.close(), 1000);
-            </script>
-        </body>
-        </html>
-        '''
+        return render_template('callback.html', token=token)
     return 'No token', 400
 
 
@@ -2785,6 +1542,25 @@ def lastfm_session():
             return jsonify({'error': result.get('message', 'Failed')})
     except Exception as e:
         return jsonify({'error': str(e)})
+
+
+@app.route('/icon.png')
+@app.route('/Icon.png')
+@app.route('/favicon.ico')
+def serve_logo():
+    from flask import send_from_directory
+    api_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(api_dir)
+    public_dir = os.path.join(root_dir, 'public')
+    
+    if os.path.exists(os.path.join(root_dir, 'Icon.png')):
+        return send_from_directory(root_dir, 'Icon.png')
+    elif os.path.exists(os.path.join(public_dir, 'Icon.png')):
+        return send_from_directory(public_dir, 'Icon.png')
+    elif os.path.exists(os.path.join(public_dir, 'icon.png')):
+        return send_from_directory(public_dir, 'icon.png')
+    return 'Not found', 404
+
 
 
 app = app
