@@ -1,12 +1,17 @@
-# YT Music Scrobbler 🎵
+<div align="center">
+  <img src="public/Icon.png" alt="YT Music Scrobbler Logo" width="108" height="108" style="border-radius: 22px; box-shadow: 0 8px 24px rgba(255, 42, 75, 0.25);">
+  <h1>YT Music Scrobbler</h1>
+  <p><strong>Sync YouTube Music listening history to Last.fm automatically across all your devices.</strong></p>
 
-A fast, lightweight, and modern web application that automatically syncs your YouTube Music listening history to Last.fm from **any device** (Phone, PC, TV, Nest Audio) using central YouTube Watch History.
-
-**Live Instance:** [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
+  <p>
+    <a href="https://ytscrobbler.kuberbassi.com"><img src="https://img.shields.io/badge/Live_App-ytscrobbler.kuberbassi.com-ff2a4b?style=for-the-badge&logo=youtube-music&logoColor=white" alt="Live App"></a>
+    <a href="https://github.com/kuberbassi/ytmusic-scrobbler"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
+  </p>
+</div>
 
 ---
 
-## Key Features
+## 🚀 Key Features
 
 - **📱 Cross-Device Coverage** — Scrobbles listening history from Phone, Desktop Web, Smart TV, or Google Nest devices via central YouTube Watch History.
 - **⚡ Modular Web Architecture** — Clean separation of concerns with HTML templates, Vanilla CSS design tokens, modular JavaScript engines, and lightweight Python backend API routes.
@@ -18,7 +23,7 @@ A fast, lightweight, and modern web application that automatically syncs your Yo
 
 ---
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 ytmusic-scrobbler/
@@ -35,7 +40,7 @@ ytmusic-scrobbler/
 │   ├── index.html        # Main dashboard & landing page
 │   ├── legal.html        # Terms of Service & Privacy Policy template
 │   └── callback.html     # Last.fm OAuth popup verification template
-├── public/               # Static public assets (icons, robots.txt, sitemap.xml)
+├── public/               # Static public assets (Icon.png, robots.txt, sitemap.xml)
 ├── local_run.py          # Local development server runner
 ├── vercel.json           # Vercel CDN static routes & serverless config
 └── requirements.txt      # Python dependencies
@@ -43,7 +48,7 @@ ytmusic-scrobbler/
 
 ---
 
-## Quick Start
+## ⚡ Quick Start
 
 1. Visit [ytscrobbler.kuberbassi.com](https://ytscrobbler.kuberbassi.com)
 2. Sign in with Google.
@@ -53,7 +58,7 @@ ytmusic-scrobbler/
 
 ---
 
-## Local Development
+## 💻 Local Development
 
 ```bash
 # 1. Clone repository
@@ -75,7 +80,7 @@ Open `http://localhost:3000` in your browser.
 
 ---
 
-## Deployment (Vercel)
+## 🌐 Deployment (Vercel)
 
 Set the following environment variables on Vercel:
 
@@ -91,6 +96,6 @@ CRON_SECRET=your-cron-secret
 
 ---
 
-## License
+## 📜 License
 
 [MIT](LICENSE)
