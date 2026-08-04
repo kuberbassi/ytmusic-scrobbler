@@ -6,6 +6,7 @@ import hashlib
 import time
 import urllib.parse
 from datetime import datetime
+from typing import Optional
 from functools import wraps
 from collections import defaultdict
 import pylast
@@ -20,14 +21,14 @@ try:
         UserDataStore, is_multi_user_enabled, get_or_create_user,
         get_all_active_users, get_file_storage, get_or_create_user_by_google,
         get_user_by_id, iterate_active_users, get_active_users_count,
-        update_user_last_sync
+        update_user_last_sync, update_user_settings
     )
 except ImportError:
     from database import (
         UserDataStore, is_multi_user_enabled, get_or_create_user,
         get_all_active_users, get_file_storage, get_or_create_user_by_google,
         get_user_by_id, iterate_active_users, get_active_users_count,
-        update_user_last_sync
+        update_user_last_sync, update_user_settings
     )
 
 # Google OAuth Configuration
@@ -1173,6 +1174,66 @@ def scrobble():
     finally:
         sync_operation_lock.release()
 
+# 30 days inactivity threshold (1 month in seconds)
+INACTIVITY_AUTO_DISABLE_SECONDS = 30 * 24 * 60 * 60
+
+def check_and_auto_disable_inactive_user(user_id: Optional[str], meta_map: dict, config: dict, username: Optional[str] = None) -> bool:
+    """
+    Automatic Smart Method:
+    If scrobbling/listening activity has been inactive for 30 days (1 month), automatically
+    turn off auto_scrobble for that user to conserve API calls, database reads, and background resources.
+    Returns True if auto_scrobble was automatically disabled.
+    """
+    current_time = int(time.time())
+    
+    # Extract timestamps from meta_map
+    timestamps = [
+        m.get('timestamp', 0) for m in meta_map.values()
+        if isinstance(m, dict) and isinstance(m.get('timestamp'), (int, float)) and m.get('timestamp') > 0
+    ]
+    
+    latest_activity = max(timestamps) if timestamps else 0
+    
+    # If meta_map has no timestamps yet, check user record in DB
+    if latest_activity == 0 and user_id and is_multi_user_enabled():
+        try:
+            user_data = get_user_by_id(user_id)
+            if user_data and user_data.get('last_sync_at'):
+                sync_str = user_data.get('last_sync_at')
+                dt = datetime.fromisoformat(sync_str.replace('Z', '+00:00'))
+                latest_activity = int(dt.timestamp())
+        except Exception as e:
+            print(f"[WARN] Error reading last_sync_at for inactivity check: {e}")
+
+    if latest_activity == 0:
+        return False  # Active or newly registered user with no previous timestamps
+
+    inactivity_seconds = current_time - latest_activity
+    if inactivity_seconds > INACTIVITY_AUTO_DISABLE_SECONDS:
+        days_inactive = round(inactivity_seconds / 86400, 1)
+        print(f"[AUTO-DISABLE] User '{username or user_id or 'local'}' inactive for {days_inactive} days (>30 days). Disabling auto-scrobble.")
+        
+        # Turn off auto_scrobble in config
+        if isinstance(config, dict):
+            config['auto_scrobble'] = False
+            ConfigManager.save(config, user_id=user_id)
+            
+        # Update database settings in multi-user mode
+        if is_multi_user_enabled() and user_id:
+            try:
+                store = UserDataStore(user_id=user_id)
+                db_cfg = store.get_config() or {}
+                db_cfg['auto_scrobble'] = False
+                update_user_settings(user_id, db_cfg)
+            except Exception as e:
+                print(f"[WARN] Failed to update DB settings for auto-disable: {e}")
+                
+        add_sync_log("System", f"Auto-scrobble OFF ({days_inactive}d inactive)", status="AutoOff", user=username)
+        return True
+        
+    return False
+
+
 # Background Worker (for local/single-user mode)
 class BackgroundScrobbler:
     """
@@ -1330,6 +1391,9 @@ class BackgroundScrobbler:
         
         if scrobbled_count > 0:
             print(f"[INFO] Background Sync: {scrobbled_count} tracks scrobbled for {username or 'local'}")
+        else:
+            # Automatic Smart Method: check if user has been inactive for > 30 days (1 month)
+            check_and_auto_disable_inactive_user(user_id, meta_map, config, username)
         
         return scrobbled_count
 
