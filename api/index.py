@@ -1299,10 +1299,11 @@ class BackgroundScrobbler:
         data_store.clear_session()
         history_set, meta_map = data_store.get_scrobble_history()
         
-        # Seed local history from Last.fm recent tracks (up to 200 tracks)
+        # Seed local history from Last.fm recent tracks (up to 20 tracks for routine sync, 50 if empty)
         try:
             authenticated_user = network.get_authenticated_user()
-            recent = network.get_user(authenticated_user).get_recent_tracks(limit=200)
+            recent_limit = 20 if meta_map else 50
+            recent = network.get_user(authenticated_user).get_recent_tracks(limit=recent_limit)
             for r in recent:
                 track_uids = generate_track_uids(r.track.title, r.track.artist.name)
                 already_scrobbled, _ = is_track_scrobbled(track_uids, meta_map, data_store)
@@ -1398,15 +1399,20 @@ class BackgroundScrobbler:
         return scrobbled_count
 
     def start(self):
+        # Do not start persistent background thread in serverless environments (Vercel)
+        if os.environ.get('VERCEL') or os.environ.get('VERCEL_ENV'):
+            print("[INFO] Vercel environment detected. Persistent background thread disabled (use Vercel Cron / external cron).")
+            return
         if self.thread is None or not self.thread.is_alive():
             self.stop_event.clear()
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
 
 
-# Initialize background worker (only runs in single-user mode)
+# Initialize background worker (only runs in single-user mode locally)
 bg_scrobbler = BackgroundScrobbler()
-bg_scrobbler.start()
+if not (os.environ.get('VERCEL') or os.environ.get('VERCEL_ENV')):
+    bg_scrobbler.start()
 
 
 # =============================================================================

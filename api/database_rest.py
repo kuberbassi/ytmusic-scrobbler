@@ -27,30 +27,43 @@ def get_headers() -> Dict[str, str]:
     }
 
 
+_multi_user_cache = None
+_multi_user_cache_time = 0
+CACHE_TTL = 300  # Cache result for 5 minutes
+
 def is_multi_user_enabled() -> bool:
-    """Check if multi-user mode is available via REST API"""
+    """Check if multi-user mode is available via REST API (cached for 5 mins)"""
+    global _multi_user_cache, _multi_user_cache_time
     if not REST_API_AVAILABLE:
         return False
+
+    now = time.time()
+    if _multi_user_cache is not None and (now - _multi_user_cache_time < CACHE_TTL):
+        return _multi_user_cache
+
     try:
         # Test connection with a simple query
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/users?select=id&limit=1",
             headers=get_headers(),
-            timeout=10
+            timeout=5
         )
         # 200 = table exists, 404 or other = need to create tables
         if response.status_code == 200:
             print("[INFO] Supabase REST API connected successfully")
-            return True
+            _multi_user_cache = True
         elif response.status_code == 404:
             print("[INFO] Supabase tables not found - will use file storage")
-            return False
+            _multi_user_cache = False
         else:
             print(f"[WARN] Supabase REST API returned {response.status_code}: {response.text[:200]}")
-            return False
+            _multi_user_cache = False
     except requests.RequestException as e:
         print(f"[ERROR] Supabase REST API connection failed: {e}")
-        return False
+        _multi_user_cache = False
+
+    _multi_user_cache_time = now
+    return _multi_user_cache
 
 
 def init_database():
