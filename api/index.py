@@ -1299,30 +1299,30 @@ class BackgroundScrobbler:
         data_store.clear_session()
         history_set, meta_map = data_store.get_scrobble_history()
         
-        # Seed local history from Last.fm recent tracks (up to 20 tracks for routine sync, 50 if empty)
-        try:
-            authenticated_user = network.get_authenticated_user()
-            recent_limit = 20 if meta_map else 50
-            recent = network.get_user(authenticated_user).get_recent_tracks(limit=recent_limit)
-            for r in recent:
-                track_uids = generate_track_uids(r.track.title, r.track.artist.name)
-                already_scrobbled, _ = is_track_scrobbled(track_uids, meta_map, data_store)
-                if already_scrobbled:
-                    continue
-                try:
-                    lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
-                except (TypeError, ValueError):
-                    lfm_ts = int(time.time())
-                meta = {
-                    'timestamp': lfm_ts,
-                    'track_title': r.track.title,
-                    'artist': r.track.artist.name
-                }
-                for uid in track_uids:
-                    data_store.save_scrobble(uid, meta)
-                    meta_map[uid] = meta
-        except Exception as e:
-            print(f"[BG] Last.fm sync check failed: {e} — relying on DB-only deduplication")
+        # Seed local history from Last.fm only if DB history is empty (cold start)
+        if not meta_map:
+            try:
+                lfm_user = username if username else network.get_authenticated_user()
+                recent = network.get_user(lfm_user).get_recent_tracks(limit=30)
+                for r in recent:
+                    track_uids = generate_track_uids(r.track.title, r.track.artist.name)
+                    already_scrobbled, _ = is_track_scrobbled(track_uids, meta_map, data_store)
+                    if already_scrobbled:
+                        continue
+                    try:
+                        lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
+                    except (TypeError, ValueError):
+                        lfm_ts = int(time.time())
+                    meta = {
+                        'timestamp': lfm_ts,
+                        'track_title': r.track.title,
+                        'artist': r.track.artist.name
+                    }
+                    for uid in track_uids:
+                        data_store.save_scrobble(uid, meta)
+                        meta_map[uid] = meta
+            except Exception as e:
+                print(f"[BG] Last.fm sync check failed: {e} — relying on DB-only deduplication")
 
         try:
             history = ytmusic.get_history()
@@ -1448,10 +1448,10 @@ def cron_sync():
     # Parse pagination params for large-scale processing
     batch_size = min(int(request.args.get('batch_size', 50)), 100)  # Max 100 per batch
     offset = int(request.args.get('offset', 0))
-    max_users = min(int(request.args.get('max_users', 200)), 500)  # Max 500 per cron run
+    max_users = min(int(request.args.get('max_users', 20)), 100)  # Max 20 per cron run (prevents timeouts)
     
     start_time = time.time()
-    max_runtime = 55  # Vercel function timeout is 60s, leave buffer
+    max_runtime = 20  # cron-job.org timeout is 30s; respond within 20s budget
     
     results = {
         'users_processed': 0,
