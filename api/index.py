@@ -1318,8 +1318,8 @@ class BackgroundScrobbler:
                         'track_title': r.track.title,
                         'artist': r.track.artist.name
                     }
+                    data_store.save_scrobbles(track_uids, meta)
                     for uid in track_uids:
-                        data_store.save_scrobble(uid, meta)
                         meta_map[uid] = meta
             except Exception as e:
                 print(f"[BG] Last.fm sync check failed: {e} — relying on DB-only deduplication")
@@ -1374,12 +1374,10 @@ class BackgroundScrobbler:
                         'track_title': title,
                         'artist': artist
                     }
-                    # Save to DB AND immediately update local meta_map.
-                    # Direct map update is critical: save_scrobble() returns set(),{}
-                    # on DB failure, which would zero out meta_map and cause a
-                    # scrobble loop on every subsequent cron tick.
+                    # Save every UID alias in one DB request and immediately
+                    # update the local map used for this sync run.
+                    data_store.save_scrobbles(track_uids, scrobble_meta)
                     for uid in track_uids:
-                        data_store.save_scrobble(uid, scrobble_meta)
                         meta_map[uid] = scrobble_meta  # Always stays accurate
                     add_sync_log(artist, title, status="Auto", user=username)
                     scrobbled_count += 1

@@ -529,11 +529,45 @@ def save_user_scrobble(user_id: str, track_uid: str, meta: Dict) -> Tuple[Set[st
                     timeout=10
                 )
         
-        return get_user_scrobble_history(user_id)
+        # The caller already keeps its in-memory history map up to date. Reading
+        # the user's entire history again after every UID made one track require
+        # several full, paginated database downloads and regularly exhausted the
+        # external cron request timeout.
+        return {track_uid}, {track_uid: meta}
         
     except requests.RequestException as e:
         print(f"[ERROR] save_user_scrobble failed: {e}")
         return set(), {}
+
+
+def save_user_scrobbles(user_id: str, track_uids: list, meta: Dict) -> bool:
+    """Persist all aliases for one track in a single Supabase upsert."""
+    if not REST_API_AVAILABLE or not user_id or not track_uids:
+        return False
+
+    current_time = int(time.time())
+    headers = get_headers()
+    headers['Prefer'] = 'resolution=merge-duplicates,return=minimal'
+    rows = [{
+        'user_id': user_id,
+        'track_uid': uid,
+        'track_title': meta.get('track_title', ''),
+        'artist': meta.get('artist', ''),
+        'last_scrobble_time': meta.get('timestamp', current_time),
+        'scrobble_count': 1
+    } for uid in dict.fromkeys(track_uids)]
+
+    try:
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/scrobbles?on_conflict=user_id,track_uid",
+            headers=headers,
+            json=rows,
+            timeout=5
+        )
+        return response.status_code in (200, 201, 204)
+    except requests.RequestException as e:
+        print(f"[ERROR] save_user_scrobbles failed: {e}")
+        return False
 
 
 # ============================================================================
@@ -692,6 +726,20 @@ class UserDataStore:
         if self._use_db and self.user_id:
             return save_user_scrobble(self.user_id, track_uid, meta)
         return get_file_storage().save_scrobble(track_uid, meta)
+
+    def save_scrobbles(self, track_uids: list, meta: Dict) -> bool:
+        """Save every UID alias for a track, batching database-backed writes."""
+        unique_uids = list(dict.fromkeys(track_uids))
+        self._session_scrobbled.update(unique_uids)
+        if self._use_db and self.user_id:
+            if save_user_scrobbles(self.user_id, unique_uids, meta):
+                return True
+            # Preserve scrobble history if a deployment has not yet picked up
+            # the composite upsert constraint or rejects a bulk payload.
+            return all(bool(save_user_scrobble(self.user_id, uid, meta)[0]) for uid in unique_uids)
+        for uid in unique_uids:
+            get_file_storage().save_scrobble(uid, meta)
+        return True
 
 
 # Test connection on module load
