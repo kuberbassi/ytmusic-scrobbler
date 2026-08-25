@@ -113,12 +113,12 @@ node --check static/js/app.js
 git diff --check
 ```
 
-## Machine-readable information
+## Public indexing
 
-- [`llms.txt`](https://ytscrobbler.kuberbassi.com/llms.txt) provides a concise product index for AI systems.
-- [`llms-full.txt`](https://ytscrobbler.kuberbassi.com/llms-full.txt) documents capabilities, limitations, architecture, security, and creator context.
-- [`humans.txt`](https://ytscrobbler.kuberbassi.com/humans.txt) contains creator attribution.
-- [`.well-known/security.txt`](https://ytscrobbler.kuberbassi.com/.well-known/security.txt) provides responsible disclosure contacts.
+The hosted application is intentionally excluded from search-engine and AI-crawler
+indexing. It remains accessible to users who have its direct URL. Responsible
+disclosure contacts remain available at
+[`/.well-known/security.txt`](https://ytscrobbler.kuberbassi.com/.well-known/security.txt).
 
 ## License
 

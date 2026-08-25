@@ -163,6 +163,7 @@ def add_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['X-Robots-Tag'] = 'noindex, nofollow, noarchive, nosnippet'
     # CSP for HTML responses only
     if response.content_type and 'text/html' in response.content_type:
         response.headers['Content-Security-Policy'] = (
@@ -670,16 +671,11 @@ def index():
 
 @app.route('/robots.txt')
 def robots():
-    return "User-agent: *\nAllow: /\nSitemap: https://ytscrobbler.kuberbassi.com/sitemap.xml", 200, {'Content-Type': 'text/plain'}
+    return "User-agent: *\nDisallow: /\n", 200, {'Content-Type': 'text/plain'}
 
 @app.route('/sitemap.xml')
 def sitemap():
-    return '''<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://ytscrobbler.kuberbassi.com/</loc><priority>1.0</priority></url>
-  <url><loc>https://ytscrobbler.kuberbassi.com/privacy</loc><priority>0.5</priority></url>
-  <url><loc>https://ytscrobbler.kuberbassi.com/terms</loc><priority>0.5</priority></url>
-</urlset>''', 200, {'Content-Type': 'application/xml'}
+    return 'Sitemap removed', 410, {'Content-Type': 'text/plain'}
 
 
 # Terms and Privacy routes use templates/legal.html

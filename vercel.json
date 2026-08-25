@@ -28,24 +28,8 @@
       "dest": "/public/Icon.png"
     },
     {
-      "src": "/sitemap.xml",
-      "dest": "/public/sitemap.xml"
-    },
-    {
       "src": "/robots.txt",
       "dest": "/public/robots.txt"
-    },
-    {
-      "src": "/llms.txt",
-      "dest": "/public/llms.txt"
-    },
-    {
-      "src": "/llms-full.txt",
-      "dest": "/public/llms-full.txt"
-    },
-    {
-      "src": "/humans.txt",
-      "dest": "/public/humans.txt"
     },
     {
       "src": "/site.webmanifest",
