@@ -687,11 +687,38 @@ def sitemap():
 @app.route('/terms')
 def terms():
     content = '''
-        <p><strong>1. Service Description:</strong> YT Music Scrobbler automatically syncs your YouTube Music listening history to Last.fm across all your devices.</p>
-        <p><strong>2. Account & Data:</strong> Your credentials and listening history are stored securely per-user in Supabase and are never shared or sold.</p>
-        <p><strong>3. Acceptable Use:</strong> You agree not to abuse the service, bypass rate limits, or attempt unauthorized data access.</p>
-        <p><strong>4. Availability:</strong> The service is provided "as is" with no uptime guarantees.</p>
-        <p><strong>5. Contact:</strong> For inquiries or data deletion, contact <a href="https://kuberbassi.com" target="_blank">kuberbassi.com</a>.</p>
+        <p><strong>Effective date:</strong> August 25, 2026</p>
+        <p>These Terms govern your use of YT Music Scrobbler, an independent open-source service operated by Kuber Bassi. By using the service, you agree to these Terms.</p>
+
+        <h2>1. Service</h2>
+        <p>YT Music Scrobbler checks newly observed items in your YouTube Music history and submits eligible tracks to the Last.fm account you authorize. When Auto Scrobble is enabled, eligible accounts are normally checked about every five minutes, including while the browser is closed. Timing is not guaranteed and synchronization is not real-time.</p>
+
+        <h2>2. Accuracy and limitations</h2>
+        <p>YouTube Music provides a recent-history snapshot without reliable playback duration or an exact event timestamp for every item. The service uses filters and persistent duplicate protection, but it may miss legitimate repeat plays, omit items, classify content incorrectly, or be delayed. You are responsible for reviewing your Last.fm library and correcting unwanted entries.</p>
+
+        <h2>3. Your accounts and credentials</h2>
+        <p>You must have permission to use every Google, YouTube Music, and Last.fm account or credential you connect. You are responsible for keeping credentials confidential, maintaining valid sessions, and promptly replacing or revoking credentials you believe are compromised. Do not provide credentials belonging to another person.</p>
+
+        <h2>4. Third-party services</h2>
+        <p>The service depends on Google OAuth, YouTube Music, Last.fm, Supabase, Vercel, and cron-job.org. Your use of those services remains subject to their own terms and policies. Their APIs, availability, authentication requirements, and behavior may change without notice. YT Music Scrobbler is not affiliated with, endorsed by, or sponsored by Google, YouTube, or Last.fm.</p>
+
+        <h2>5. Acceptable use</h2>
+        <p>You may not abuse the service, bypass rate limits or access controls, interfere with other users, probe for credentials, use automated traffic outside the intended workflow, or use the service unlawfully. Access may be limited or suspended to protect users, infrastructure, or third-party services.</p>
+
+        <h2>6. Availability and changes</h2>
+        <p>The service is provided on an "as is" and "as available" basis without uptime, continuity, compatibility, or error-free-operation guarantees. Features may be changed, paused, or discontinued. Where practical, material changes to these Terms will be reflected by updating the effective date.</p>
+
+        <h2>7. Disclaimer and limitation of liability</h2>
+        <p>To the maximum extent permitted by applicable law, no warranties are made regarding accuracy, availability, fitness for a particular purpose, or non-infringement. The operator is not liable for lost scrobbles, duplicate scrobbles, account restrictions, credential expiry, third-party outages, lost data, or indirect or consequential loss arising from use of the service. Nothing in these Terms excludes liability that cannot legally be excluded.</p>
+
+        <h2>8. Privacy and account deletion</h2>
+        <p>The <a href="/privacy">Privacy Policy</a> explains how data is handled. You may request deletion of your account and associated application data by emailing <a href="mailto:me@kuberbassi.com">me@kuberbassi.com</a> from the Google email address connected to the account. Identity may be verified before deletion.</p>
+
+        <h2>9. Eligibility and governing law</h2>
+        <p>You must be legally able to agree to these Terms and meet the minimum age required for your connected accounts. These Terms are governed by the laws of India, without limiting any mandatory consumer rights that apply where you live. Courts with jurisdiction in New Delhi, India will have jurisdiction where legally permitted.</p>
+
+        <h2>10. Contact</h2>
+        <p>Questions about these Terms may be sent to <a href="mailto:me@kuberbassi.com">me@kuberbassi.com</a>.</p>
     '''
     return render_template('legal.html', title="Terms of Service", path="/terms", content=content)
 
@@ -699,10 +726,48 @@ def terms():
 @app.route('/privacy')
 def privacy():
     content = '''
-        <p><strong>1. Information We Collect:</strong> Google profile info via OAuth, Last.fm credentials, YT Music browser headers, and scrobble logs.</p>
-        <p><strong>2. How We Use Data:</strong> Exclusively to authenticate you and sync your music history to Last.fm.</p>
-        <p><strong>3. Data Security:</strong> Secured with PostgreSQL Row-Level Security, HTTPS, and session hardening.</p>
-        <p><strong>4. Deletion:</strong> You can request full data deletion at any time.</p>
+        <p><strong>Effective date:</strong> August 25, 2026</p>
+        <p>This Privacy Policy explains how Kuber Bassi, the operator of YT Music Scrobbler, handles information when you use the service. Contact: <a href="mailto:me@kuberbassi.com">me@kuberbassi.com</a>.</p>
+
+        <h2>1. Information collected</h2>
+        <ul>
+            <li><strong>Google account information:</strong> Google account ID, email address, display name, and profile picture obtained through the <code>openid</code>, <code>email</code>, and <code>profile</code> OAuth scopes. The temporary Google access token used to retrieve this profile is not intentionally persisted by the application.</li>
+            <li><strong>Last.fm connection information:</strong> the API key and shared secret you provide, the session key returned after authorization, and the Last.fm username associated with that session.</li>
+            <li><strong>YouTube Music connection information:</strong> browser request headers that may contain authentication cookies and related request metadata.</li>
+            <li><strong>Listening and synchronization records:</strong> track identifiers, titles, artists, timestamps or estimated observation times, duplicate-protection aliases, sync status, failure messages, and account settings.</li>
+            <li><strong>Technical information:</strong> session cookies, request metadata, security/rate-limit information, and server logs. Vercel Web Analytics may process aggregated page-view data such as route, referrer, approximate location, browser, operating system, and device category without third-party analytics cookies.</li>
+        </ul>
+
+        <h2>2. How information is used</h2>
+        <p>Information is used to authenticate users, connect the requested music services, retrieve YouTube Music history, submit scrobbles to Last.fm, prevent duplicates, display connection and sync health, operate scheduled synchronization, secure and troubleshoot the service, prevent abuse, and understand aggregate site usage.</p>
+
+        <h2>3. Service providers and disclosures</h2>
+        <p>Information is processed only as needed to operate the service. Relevant providers include Google for sign-in and profile data, YouTube Music for listening history, Last.fm for authorization and scrobble submission, Supabase for database hosting, Vercel for hosting, function execution, logs, and analytics, cron-job.org for scheduled requests, and Google Fonts for web-font delivery. These providers may receive request metadata such as IP address and user agent under their own policies.</p>
+        <p>Personal information is not sold. It may be disclosed when required by law, to protect the service or its users, during a legitimate service transfer, or to the providers above for the stated operational purposes.</p>
+
+        <h2>4. Cookies</h2>
+        <p>The application uses an HTTP-only, secure-in-production, SameSite=Lax session cookie to keep you signed in. A persistent login session may last up to 30 days, but can end sooner when you sign out, clear browser data, or when server-side session conditions change. Vercel Web Analytics is designed not to use third-party analytics cookies.</p>
+
+        <h2>5. Retention</h2>
+        <p>Account configuration, credentials, settings, and scrobble records are retained while the account remains in use or until deletion is requested, unless a longer period is reasonably necessary for security, legal obligations, dispute resolution, or backup integrity. In-memory operational data is temporary. Hosting and infrastructure providers may retain logs and backups according to their own retention schedules.</p>
+
+        <h2>6. Security</h2>
+        <p>Reasonable safeguards include HTTPS, HTTP-only session cookies, server-only credential responses, authenticated endpoints, rate limiting, Supabase Row Level Security, removal of anon access to credential-bearing tables, and protected cron requests. No online system can guarantee absolute security. If you believe credentials were exposed, revoke or replace them and contact the operator.</p>
+
+        <h2>7. International processing</h2>
+        <p>The operator is based in India. The providers used by the service may process or store information in other countries. Those countries may have data-protection rules different from those where you live.</p>
+
+        <h2>8. Your choices and rights</h2>
+        <p>You can sign out, disable Auto Scrobble, replace connected credentials, or revoke access through Google and Last.fm. Depending on applicable law, you may request access, correction, deletion, restriction, objection, or a copy of personal information associated with your account. Requests should be sent to <a href="mailto:me@kuberbassi.com">me@kuberbassi.com</a> from the connected Google email address. Identity may be verified before a request is completed.</p>
+
+        <h2>9. Account deletion</h2>
+        <p>There is currently no self-service deletion button. To request deletion of the application account, stored integration credentials, settings, and associated scrobble records, email <a href="mailto:me@kuberbassi.com">me@kuberbassi.com</a> from the connected Google email address. Data may remain temporarily in infrastructure backups until those backups expire.</p>
+
+        <h2>10. Children</h2>
+        <p>The service is not directed to children under 13, or under the higher minimum age required by applicable local law or a connected service. Do not use the service if you cannot legally consent to this processing.</p>
+
+        <h2>11. Changes</h2>
+        <p>This policy may be updated when the service or legal requirements change. Material changes will be indicated by revising the effective date. Continued use after an update is subject to the revised policy where permitted by law.</p>
     '''
     return render_template('legal.html', title="Privacy Policy", path="/privacy", content=content)
 

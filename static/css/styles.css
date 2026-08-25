@@ -1330,6 +1330,37 @@ body {
 }
 
 /* Legal Page Styling */
+.legal-content {
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.75;
+}
+
+.legal-content h2 {
+    margin: 30px 0 10px;
+    color: var(--text-primary);
+    font-size: 18px;
+    line-height: 1.35;
+}
+
+.legal-content p {
+    margin-bottom: 14px;
+}
+
+.legal-content ul {
+    margin: 0 0 18px;
+    padding-left: 22px;
+}
+
+.legal-content li {
+    margin-bottom: 9px;
+}
+
+.legal-content code {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+}
+
 .back-link {
     color: var(--text-secondary);
     text-decoration: none;
