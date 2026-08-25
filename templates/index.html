@@ -63,7 +63,7 @@
         <div class="login-hero">
             <h1 class="login-title">YouTube Music → Last.fm</h1>
             <p class="login-subtitle">
-                Automatically scrobble your YouTube Music listening history to Last.fm in real time across Desktop,
+                Automatically sync newly observed YouTube Music history to Last.fm across Desktop,
                 Mobile, Smart TVs, and Nest Audio.
             </p>
         </div>
@@ -240,9 +240,9 @@
             <div class="card">
                 <div class="card-header">
                     <div class="card-title-group">
-                        <span class="card-title">Live Connections</span>
+                    <span class="card-title">Connection Health</span>
                     </div>
-                    <button class="btn btn-secondary btn-sm" onclick="checkStatus()">Refresh</button>
+                    <button class="btn btn-secondary btn-sm" onclick="checkStatus(true)">Check now</button>
                 </div>
                 <div class="card-body">
                     <div class="status-item">
@@ -311,7 +311,7 @@
                             </svg>
                             Scrobble Now
                         </button>
-                        <button class="btn btn-secondary" onclick="showTab('history'); loadHistory();">
+                        <button class="btn btn-secondary" onclick="showTab('history')">
                             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <circle cx="12" cy="12" r="10" />
@@ -338,6 +338,23 @@
             <div class="card">
                 <div class="card-header"><span class="card-title">Last.fm Credentials</span></div>
                 <div class="card-body">
+                    <div id="lastfm-connected-panel" class="account-connected-panel" style="display:none;">
+                        <div class="account-connected-icon">✓</div>
+                        <div class="account-connected-copy">
+                            <strong id="lastfm-connected-title">Last.fm connected</strong>
+                            <span id="lastfm-connected-description">Credentials are encrypted and stored securely.</span>
+                            <div class="credential-status-list" aria-label="Last.fm credential status">
+                                <span><b>✓</b> API key saved</span>
+                                <span><b>✓</b> API secret saved securely</span>
+                                <span id="lastfm-session-status"><b>✓</b> Session key received and saved securely</span>
+                            </div>
+                        </div>
+                        <div class="account-connected-actions">
+                            <button class="btn btn-secondary btn-sm" onclick="authorizeLastfm()">Reauthorize</button>
+                            <button class="btn btn-secondary btn-sm" onclick="showLastfmEditor()">Replace credentials</button>
+                        </div>
+                    </div>
+                    <div id="lastfm-form">
                     <div class="form-group">
                         <label class="form-label">API Key</label>
                         <input type="text" class="form-input" id="lastfm-key"
@@ -360,9 +377,14 @@
                                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                                     <polyline points="15 3 21 3 21 9" />
                                     <line x1="10" y1="14" x2="21" y2="3" />
-                                </svg> Click here to Authorize with Last.fm</a></p>
+                                </svg> Save credentials &amp; Authorize with Last.fm</a><br>
+                            Your API key and secret will be saved before authorization. The generated session key is
+                            then received and stored automatically.</p>
                     </div>
                     <button class="btn btn-primary" onclick="saveLastfm()">Save Last.fm Account</button>
+                    <button id="lastfm-cancel-edit" class="btn btn-secondary" onclick="cancelLastfmEditor()"
+                        style="display:none;margin-left:8px;">Cancel</button>
+                    </div>
                 </div>
             </div>
 
@@ -398,8 +420,6 @@
                 <div class="card-header">
                     <span class="card-title">YouTube Music History</span>
                     <div style="display:flex;gap:8px;">
-                        <button class="btn btn-secondary btn-sm" onclick="resetHistoryCache()"
-                            title="Clear local scrobble history cache">Reset Cache</button>
                         <button class="btn btn-secondary btn-sm" onclick="loadHistory()">Refresh</button>
                     </div>
                 </div>
@@ -416,7 +436,7 @@
                         </div>
                     </div>
                     <div id="history-list" class="history-list">
-                        <div class="empty">Click Refresh to load history</div>
+                        <div class="empty">Open History to load recent tracks</div>
                     </div>
                 </div>
             </div>
@@ -424,6 +444,68 @@
 
         <!-- Setup Guide Tab -->
         <div id="guide" class="tab-content">
+            <div class="card">
+                <div class="card-header"><span class="card-title">Connect Last.fm</span></div>
+                <div class="card-body">
+                    <p class="guide-intro">Create your own Last.fm API credentials once, save them here, then approve
+                        access to your Last.fm account. Your secret and session key are never displayed after saving.</p>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">1</span>Create a Last.fm API account</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Open <a href="https://www.last.fm/api/account/create" target="_blank"
+                                rel="noopener noreferrer">last.fm/api/account/create</a> while signed in to Last.fm.
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">2</span>Fill in the application details</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Use <code>YT Music Scrobbler</code> as the application name. For the description, enter
+                            <code>Synchronizes my YouTube Music listening history with Last.fm.</code><br><br>
+                            Callback URL: <code>https://ytscrobbler.kuberbassi.com/api/lastfm-callback</code><br>
+                            Application homepage: <code>https://ytscrobbler.kuberbassi.com</code>
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">3</span>Save the API key and secret</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Last.fm will provide an <strong>API Key</strong> and <strong>Shared Secret</strong>. Copy both
+                            into the Last.fm Credentials section in <a href="#" onclick="showTab('connect'); return false;">Accounts</a>,
+                            then select <strong>Save Last.fm Account</strong>. Do not put either value in the Session Key field.
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">4</span>Authorize your Last.fm account</div>
+                        </div>
+                        <div class="guide-step-body">
+                            Select <strong>Authorize with Last.fm</strong> (or <strong>Reauthorize</strong> after saving),
+                            approve access in the popup, and return to this site. Keep popups enabled for this step.
+                        </div>
+                    </div>
+
+                    <div class="guide-step">
+                        <div class="guide-step-header">
+                            <div><span class="guide-step-num">5</span>Confirm the session was received</div>
+                        </div>
+                        <div class="guide-step-body">
+                            The site captures and stores the session key automatically. For security, the actual key is
+                            intentionally hidden and never needs to be copied. A green
+                            <strong>Last.fm authorization successful</strong> panel confirms that it was received.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card">
                 <div class="card-header"><span class="card-title">How to Extract YouTube Music Browser Headers</span>
                 </div>

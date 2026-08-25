@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, Tuple, Set
 from datetime import datetime, timedelta
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
+SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY') or os.environ.get('SUPABASE_KEY', '')
 
 # Detect if REST API is available
 REST_API_AVAILABLE = bool(SUPABASE_URL and SUPABASE_KEY)
@@ -164,7 +164,8 @@ def _update_google_user_info(user_id: str, google_user: Dict[str, Any]) -> bool:
             timeout=5
         )
         return response.status_code in (200, 204)
-    except:
+    except requests.RequestException as e:
+        print(f"[ERROR] _update_google_user_info failed: {e}")
         return False
 
 
@@ -338,7 +339,108 @@ def update_user_last_sync(user_id: str) -> bool:
             timeout=5
         )
         return response.status_code in (200, 204)
-    except:
+    except requests.RequestException as e:
+        print(f"[ERROR] update_user_last_sync failed: {e}")
+        return False
+
+
+def claim_active_users(limit: int = 20, interval_seconds: int = 300) -> Optional[list]:
+    """Atomically claim users for one cron worker via the service-only RPC."""
+    if not REST_API_AVAILABLE:
+        return None
+    try:
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/claim_scrobble_users",
+            headers=get_headers(),
+            json={
+                'claim_limit': max(1, min(int(limit), 100)),
+                'minimum_interval_seconds': max(60, int(interval_seconds))
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()
+        print(f"[ERROR] claim_active_users failed: {response.status_code} {response.text[:200]}")
+        return None
+    except (requests.RequestException, TypeError, ValueError) as e:
+        print(f"[ERROR] claim_active_users failed: {e}")
+        return None
+
+
+def finish_user_sync(user_id: str, claim_token: str, error: Optional[str] = None, previous_failures: int = 0) -> bool:
+    """Release a claimed user and persist success/failure health."""
+    if not REST_API_AVAILABLE or not user_id or not claim_token:
+        return False
+    now = datetime.utcnow().isoformat()
+    payload = {
+        'sync_claim_token': None,
+        'sync_claimed_at': None,
+        'last_sync_error': (str(error)[:500] if error else None),
+    }
+    if error:
+        payload['last_sync_at'] = now
+        payload['consecutive_sync_failures'] = max(0, int(previous_failures)) + 1
+    else:
+        payload.update({
+            'last_sync_at': now,
+            'last_sync_success_at': now,
+            'consecutive_sync_failures': 0,
+        })
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'id': f'eq.{user_id}', 'sync_claim_token': f'eq.{claim_token}'},
+            headers=get_headers(),
+            json=payload,
+            timeout=5
+        )
+        if response.status_code not in (200, 204):
+            print(f"[ERROR] finish_user_sync failed: {response.status_code} {response.text[:200]}")
+            return False
+        return True
+    except requests.RequestException as e:
+        print(f"[ERROR] finish_user_sync failed: {e}")
+        return False
+
+
+def reset_user_sync_health(user_id: str) -> bool:
+    """Clear stale failure/backoff state after credentials are replaced."""
+    if not REST_API_AVAILABLE or not user_id:
+        return False
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'id': f'eq.{user_id}'},
+            headers=get_headers(),
+            json={
+                'last_sync_error': None,
+                'consecutive_sync_failures': 0,
+                'last_sync_attempt_at': None,
+                'updated_at': datetime.utcnow().isoformat(),
+            },
+            timeout=5
+        )
+        return response.status_code in (200, 204)
+    except requests.RequestException as e:
+        print(f"[ERROR] reset_user_sync_health failed: {e}")
+        return False
+
+
+def release_user_claim(user_id: str, claim_token: str) -> bool:
+    """Release work claimed by a cron run that reached its time budget."""
+    if not REST_API_AVAILABLE or not user_id or not claim_token:
+        return False
+    try:
+        response = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/users",
+            params={'id': f'eq.{user_id}', 'sync_claim_token': f'eq.{claim_token}'},
+            headers=get_headers(),
+            json={'sync_claim_token': None, 'sync_claimed_at': None, 'last_sync_attempt_at': None},
+            timeout=5
+        )
+        return response.status_code in (200, 204)
+    except requests.RequestException as e:
+        print(f"[ERROR] release_user_claim failed: {e}")
         return False
 
 
@@ -499,7 +601,8 @@ def save_user_scrobble(user_id: str, track_uid: str, meta: Dict) -> Tuple[Set[st
                 'track_title': meta.get('track_title', ''),
                 'artist': meta.get('artist', ''),
                 'last_scrobble_time': meta.get('timestamp', current_time),
-                'scrobble_count': 1
+                'scrobble_count': 1,
+                'timestamp_confidence': meta.get('timestamp_confidence', 'estimated')
             },
             timeout=10
         )
@@ -525,7 +628,15 @@ def save_user_scrobble(user_id: str, track_uid: str, meta: Dict) -> Tuple[Set[st
                 requests.post(
                     f"{SUPABASE_URL}/rest/v1/scrobbles",
                     headers=get_headers(),
-                    json={'user_id': user_id, 'track_uid': track_uid, 'track_title': meta.get('track_title', ''), 'artist': meta.get('artist', ''), 'last_scrobble_time': meta.get('timestamp', current_time), 'scrobble_count': 1},
+                    json={
+                        'user_id': user_id,
+                        'track_uid': track_uid,
+                        'track_title': meta.get('track_title', ''),
+                        'artist': meta.get('artist', ''),
+                        'last_scrobble_time': meta.get('timestamp', current_time),
+                        'scrobble_count': 1,
+                        'timestamp_confidence': meta.get('timestamp_confidence', 'estimated')
+                    },
                     timeout=10
                 )
         
@@ -538,6 +649,46 @@ def save_user_scrobble(user_id: str, track_uid: str, meta: Dict) -> Tuple[Set[st
     except requests.RequestException as e:
         print(f"[ERROR] save_user_scrobble failed: {e}")
         return set(), {}
+
+
+def get_user_scrobble_matches(user_id: str, track_uids: list) -> Tuple[Set[str], Dict[str, Any]]:
+    """Fetch only aliases relevant to the current YouTube history snapshot."""
+    unique_uids = list(dict.fromkeys(uid for uid in track_uids if uid))
+    if not REST_API_AVAILABLE or not user_id or not unique_uids:
+        return set(), {}
+
+    history_set, meta_map = set(), {}
+    try:
+        # Keep URLs bounded and avoid PostgREST's default row limit.
+        for start in range(0, len(unique_uids), 100):
+            chunk = unique_uids[start:start + 100]
+            encoded = ','.join(json.dumps(uid) for uid in chunk)
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/scrobbles",
+                params={
+                    'user_id': f'eq.{user_id}',
+                    'track_uid': f'in.({encoded})',
+                    'select': 'track_uid,track_title,artist,last_scrobble_time,scrobble_count'
+                },
+                headers=get_headers(),
+                timeout=10
+            )
+            if response.status_code not in (200, 206):
+                raise RuntimeError(
+                    f"Scrobble lookup failed: {response.status_code} {response.text[:200]}"
+                )
+            for row in response.json():
+                uid = row['track_uid']
+                history_set.add(uid)
+                meta_map[uid] = {
+                    'timestamp': row.get('last_scrobble_time') or 0,
+                    'track_title': row.get('track_title') or '',
+                    'artist': row.get('artist') or '',
+                    'scrobble_count': row.get('scrobble_count') or 1
+                }
+        return history_set, meta_map
+    except requests.RequestException as e:
+        raise RuntimeError(f"Scrobble lookup failed: {e}") from e
 
 
 def save_user_scrobbles(user_id: str, track_uids: list, meta: Dict) -> bool:
@@ -554,7 +705,8 @@ def save_user_scrobbles(user_id: str, track_uids: list, meta: Dict) -> bool:
         'track_title': meta.get('track_title', ''),
         'artist': meta.get('artist', ''),
         'last_scrobble_time': meta.get('timestamp', current_time),
-        'scrobble_count': 1
+        'scrobble_count': 1,
+        'timestamp_confidence': meta.get('timestamp_confidence', 'estimated')
     } for uid in dict.fromkeys(track_uids)]
 
     try:
@@ -564,7 +716,10 @@ def save_user_scrobbles(user_id: str, track_uids: list, meta: Dict) -> bool:
             json=rows,
             timeout=5
         )
-        return response.status_code in (200, 201, 204)
+        if response.status_code in (200, 201, 204):
+            return True
+        print(f"[ERROR] save_user_scrobbles failed: {response.status_code} {response.text[:200]}")
+        return False
     except requests.RequestException as e:
         print(f"[ERROR] save_user_scrobbles failed: {e}")
         return False
@@ -596,7 +751,8 @@ class FileStorage:
             with open(self.config_file, "w") as f:
                 json.dump(config, f, indent=4)
             return True
-        except:
+        except OSError as e:
+            print(f"[ERROR] FileStorage.save_config failed: {e}")
             return False
 
     def load_scrobbles(self) -> Tuple[Set[str], Dict[str, Any]]:
@@ -696,7 +852,8 @@ class UserDataStore:
                         'headers': creds.get('ytmusic_headers', '')
                     },
                     'auto_scrobble': settings.get('auto_scrobble', False),
-                    'interval': settings.get('interval', 300)
+                    'interval': settings.get('interval', 300),
+                    'baseline_history_on_next_sync': settings.get('baseline_history_on_next_sync', False),
                 }
         return get_file_storage().load_config()
 
@@ -707,11 +864,12 @@ class UserDataStore:
             ytmusic = config.get('ytmusic', {})
             settings = {
                 'auto_scrobble': config.get('auto_scrobble', False),
-                'interval': config.get('interval', 300)
+                'interval': config.get('interval', 300),
+                'baseline_history_on_next_sync': config.get('baseline_history_on_next_sync', False),
             }
-            save_user_credentials(self.user_id, lastfm, ytmusic.get('headers', ''))
-            update_user_settings(self.user_id, settings)
-            return True
+            credentials_saved = save_user_credentials(self.user_id, lastfm, ytmusic.get('headers', ''))
+            settings_saved = update_user_settings(self.user_id, settings)
+            return credentials_saved and settings_saved
         return get_file_storage().save_config(config)
 
     def get_scrobble_history(self) -> Tuple[Set[str], Dict[str, Any]]:
@@ -719,6 +877,13 @@ class UserDataStore:
         if self._use_db and self.user_id:
             return get_user_scrobble_history(self.user_id)
         return get_file_storage().load_scrobbles()
+
+    def get_scrobble_matches(self, track_uids: list) -> Tuple[Set[str], Dict[str, Any]]:
+        if self._use_db and self.user_id:
+            return get_user_scrobble_matches(self.user_id, track_uids)
+        history, meta = get_file_storage().load_scrobbles()
+        matches = set(track_uids).intersection(history)
+        return matches, {uid: meta[uid] for uid in matches if uid in meta}
 
     def save_scrobble(self, track_uid: str, meta: Dict) -> Tuple[Set[str], Dict[str, Any]]:
         """Save a scrobble"""
@@ -732,11 +897,7 @@ class UserDataStore:
         unique_uids = list(dict.fromkeys(track_uids))
         self._session_scrobbled.update(unique_uids)
         if self._use_db and self.user_id:
-            if save_user_scrobbles(self.user_id, unique_uids, meta):
-                return True
-            # Preserve scrobble history if a deployment has not yet picked up
-            # the composite upsert constraint or rejects a bulk payload.
-            return all(bool(save_user_scrobble(self.user_id, uid, meta)[0]) for uid in unique_uids)
+            return save_user_scrobbles(self.user_id, unique_uids, meta)
         for uid in unique_uids:
             get_file_storage().save_scrobble(uid, meta)
         return True

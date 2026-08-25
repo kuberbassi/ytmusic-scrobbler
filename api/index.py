@@ -21,14 +21,16 @@ try:
         UserDataStore, is_multi_user_enabled, get_or_create_user,
         get_all_active_users, get_file_storage, get_or_create_user_by_google,
         get_user_by_id, iterate_active_users, get_active_users_count,
-        update_user_last_sync, update_user_settings
+        update_user_last_sync, update_user_settings, claim_active_users, reset_user_sync_health, release_user_claim,
+        finish_user_sync
     )
 except ImportError:
     from database import (
         UserDataStore, is_multi_user_enabled, get_or_create_user,
         get_all_active_users, get_file_storage, get_or_create_user_by_google,
         get_user_by_id, iterate_active_users, get_active_users_count,
-        update_user_last_sync, update_user_settings
+        update_user_last_sync, update_user_settings, claim_active_users, reset_user_sync_health, release_user_claim,
+        finish_user_sync
     )
 
 # Google OAuth Configuration
@@ -40,6 +42,7 @@ GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI', 'https://ytscrobbler
 # Global Sync State
 scrobble_lock = threading.Lock()  # Lock for individual scrobble calls
 sync_operation_lock = threading.Lock()  # Lock for entire sync operations (prevents overlapping syncs)
+user_sync_locks = defaultdict(threading.Lock)
 last_sync_time = 0
 sync_logs = []  # List of [timestamp, artist, title, status]
 
@@ -71,7 +74,11 @@ app = Flask(
 # stable secrets so users don't get logged out every deployment/cold start.
 _secret_key = os.environ.get('SECRET_KEY', '')
 if not _secret_key:
-    _key_source = os.environ.get('GOOGLE_CLIENT_SECRET', '') + os.environ.get('SUPABASE_KEY', '')
+    _key_source = (
+        os.environ.get('GOOGLE_CLIENT_SECRET', '')
+        + os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+        + os.environ.get('SUPABASE_KEY', '')
+    )
     if _key_source.strip():
         _secret_key = hashlib.sha256(f'ytscrobbler-session:{_key_source}'.encode()).hexdigest()
     else:
@@ -160,7 +167,7 @@ def add_security_headers(response):
     if response.content_type and 'text/html' in response.content_type:
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com; "
+            "script-src 'self' 'unsafe-inline' https://accounts.google.com; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
             "img-src 'self' data: https: blob:; "
@@ -272,11 +279,13 @@ def generate_track_uids(title: str, artist: str, video_id: str = None) -> list:
     def _add_variants(t, a):
         """Add exact + normalized UIDs for a (title, artist) pair."""
         if t and a:
-            uids.append(f"{t}_{a}")
+            raw_uid = f"{t}_{a}"
+            uids.append(raw_uid if len(raw_uid) <= 500 else f"meta:{hashlib.sha256(raw_uid.encode()).hexdigest()}")
         norm_t = normalize_string(t)
         norm_a = normalize_string(a)
         if norm_t and norm_a:
-            n_uid = f"norm:{norm_t}_{norm_a}"
+            normalized = f"{norm_t}_{norm_a}"
+            n_uid = f"norm:{normalized}" if len(normalized) <= 495 else f"norm:{hashlib.sha256(normalized.encode()).hexdigest()}"
             if n_uid not in uids:
                 uids.append(n_uid)
 
@@ -383,16 +392,13 @@ def is_track_scrobbled(track_uids: list, track_meta_map: dict, data_store=None, 
         if data_store and data_store.is_session_scrobbled(uid):
             return True, uid
             
-        # 3. Check persistent storage (only if scrobbled within cooldown window)
+        # 3. A persistent match is authoritative. YouTube history does not
+        # expose a reliable play timestamp/event cursor, so treating an older
+        # stored match as a replay causes the same history page to be submitted
+        # again on every cron run.
         meta = track_meta_map.get(uid)
         if meta:
-            timestamp = meta.get('timestamp', 0)
-            try:
-                ts = int(timestamp)
-            except (TypeError, ValueError):
-                ts = 0
-            if ts > 0 and (now - ts < cooldown_seconds):
-                return True, uid
+            return True, uid
                 
     return False, None
 
@@ -456,7 +462,7 @@ def get_track_duration(yt_track):
             if len(parts) == 2: return parts[0] * 60 + parts[1]
             if len(parts) == 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
         return int(duration_str)
-    except:
+    except (TypeError, ValueError):
         return 180
 
 
@@ -498,11 +504,10 @@ class ConfigManager:
         """Save config - to DB if multi-user enabled, else to file"""
         if is_multi_user_enabled() and user_id:
             store = UserDataStore(user_id=user_id)
-            store.save_config(config)
-            return
+            return store.save_config(config)
         
         # Fallback to file
-        get_file_storage().save_config(config)
+        return get_file_storage().save_config(config)
     
     @staticmethod
     def get_user_from_session(session_key, api_key, api_secret):
@@ -539,19 +544,12 @@ def _enrich_config_from_db(config: dict, user_id) -> dict:
     """
     if not user_id:
         return config
-    needs_lastfm = not config.get('lastfm', {}).get('api_key')
-    needs_ytmusic = not config.get('ytmusic', {}).get('headers')
-    if not needs_lastfm and not needs_ytmusic:
-        return config  # Nothing to fill in
     try:
         store = UserDataStore(user_id=user_id)
         db_cfg = store.get_config()
-        merged = dict(config)
-        if needs_lastfm and db_cfg.get('lastfm', {}).get('api_key'):
-            merged['lastfm'] = db_cfg['lastfm']
-        if needs_ytmusic and db_cfg.get('ytmusic', {}).get('headers'):
-            merged['ytmusic'] = db_cfg['ytmusic']
-        return merged
+        # In multi-user mode credentials are authoritative on the server. Never
+        # trust or require secret material echoed back from browser storage.
+        return db_cfg if db_cfg else config
     except Exception as e:
         print(f"[WARN] _enrich_config_from_db failed: {e}")
         return config
@@ -580,6 +578,25 @@ def get_lastfm_network(config):
         return network, None
     except Exception as e:
         return None, str(e)
+
+
+def validate_lastfm_session(api_key, api_secret, session_key):
+    """Validate a session with a signed Last.fm request, not object creation."""
+    params = {
+        'api_key': api_key,
+        'method': 'user.getInfo',
+        'sk': session_key,
+    }
+    signature_source = ''.join(f'{key}{params[key]}' for key in sorted(params)) + api_secret
+    response = requests.get('https://ws.audioscrobbler.com/2.0/', params={
+        **params,
+        'api_sig': hashlib.md5(signature_source.encode('utf-8')).hexdigest(),
+        'format': 'json',
+    }, timeout=10)
+    result = response.json()
+    if response.status_code >= 400 or result.get('error'):
+        raise RuntimeError(result.get('message', 'Last.fm rejected the session key'))
+    return result.get('user', {}).get('name')
 
 
 def parse_browser_headers(header_str):
@@ -814,42 +831,74 @@ def get_current_user():
 
 @app.route('/api/status', methods=['POST'])
 def status():
+    """Return configuration state, with optional on-demand credential validation.
+
+    Routine status reads stay cheap. The frontend requests a real third-party
+    probe only on initial load or when a user returns to the app, avoiding the
+    old five-second API polling loop while still detecting expired sessions.
+    """
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'error': 'Authentication required'}), 401
     config = request.json or {}
 
     # Fill in missing credentials from DB (handles stale localStorage)
     user_id = session.get('user_id')
     config = _enrich_config_from_db(config, user_id)
 
-    # Check Last.fm
-    network, _ = get_lastfm_network(config)
-    username = None
-    if network:
-        try:
-            username = str(network.get_authenticated_user())
-            lastfm_status = {'connected': True, 'username': username}
-        except:
-            lastfm_status = {'connected': False}
-    else:
-        lastfm_status = {'connected': False}
-    
-    # Check YT Music
-    ytmusic, _ = get_ytmusic_client(config)
-    if ytmusic:
-        try:
-            ytmusic.get_history()
-            ytmusic_status = {'connected': True}
-        except Exception as e:
-            print(f"Status check error (History): {e}")
+    lastfm_config = config.get('lastfm', {})
+    lastfm_connected = all(lastfm_config.get(key) for key in ('api_key', 'api_secret', 'session_key'))
+    lastfm_status = {'connected': lastfm_connected, 'validated': False}
+
+    ytmusic_config = config.get('ytmusic', {})
+    ytmusic_connected = bool(ytmusic_config.get('headers'))
+    ytmusic_status = {'connected': ytmusic_connected}
+
+    if request.args.get('validate') == '1':
+        lastfm_status['validated'] = True
+        if lastfm_connected:
             try:
-                ytmusic.search("test", limit=1)
-                ytmusic_status = {'connected': True, 'warning': "History unavailable"}
-            except Exception as e2:
-                print(f"Status check error (Search): {e2}")
-                ytmusic_status = {'connected': False}
-    else:
-        ytmusic_status = {'connected': False}
+                lastfm_status['username'] = validate_lastfm_session(
+                    lastfm_config['api_key'],
+                    lastfm_config['api_secret'],
+                    lastfm_config['session_key'],
+                )
+            except Exception as exc:
+                lastfm_status = {
+                    'connected': False,
+                    'validated': True,
+                    'error': f'Last.fm authorization expired: {str(exc)[:120]}'
+                }
+
+        if ytmusic_connected:
+            ytmusic, error = get_ytmusic_client(config)
+            if not ytmusic:
+                ytmusic_status = {'connected': False, 'error': error or 'Invalid YouTube Music headers'}
+            else:
+                try:
+                    ytmusic.get_history()
+                except Exception:
+                    ytmusic_status = {
+                        'connected': False,
+                        'error': 'YouTube Music session expired. Reconnect your browser headers.'
+                    }
+
+    username = lastfm_status.get('username')
     
     global last_sync_time, sync_logs
+
+    user_data = get_user_by_id(user_id) if user_id and is_multi_user_enabled() else None
+    persisted_sync_time = 0
+    if user_data and user_data.get('last_sync_success_at'):
+        try:
+            persisted_sync_time = int(datetime.fromisoformat(
+                user_data['last_sync_success_at'].replace('Z', '+00:00')
+            ).timestamp())
+        except (TypeError, ValueError):
+            persisted_sync_time = 0
+
+    sync_error = user_data.get('last_sync_error') if user_data else None
+    if sync_error:
+        ytmusic_status['sync_error'] = sync_error
     
     # Filter logs for current user in multi-user mode
     user_logs = sync_logs
@@ -859,7 +908,7 @@ def status():
         # Filter by Google email or Last.fm username
         user_logs = [log for log in sync_logs 
                      if log.get('user') == current_user_email 
-                     or log.get('user') == username 
+                     or (username and log.get('user') == username)
                      or log.get('user') is None][:20]
     
     last_track_title = user_logs[0]['title'] if user_logs else None
@@ -867,10 +916,11 @@ def status():
     return jsonify({
         'lastfm': lastfm_status, 
         'ytmusic': ytmusic_status,
-        'last_sync': last_sync_time,
+        'last_sync': persisted_sync_time or last_sync_time,
         'now': int(time.time()),
         'last_track': last_track_title,
         'logs': user_logs[:20],
+        'sync_error': sync_error,
         'mode': 'multi-user' if is_multi_user_enabled() else 'single-user'
     })
 
@@ -894,18 +944,23 @@ def history():
         google_user = session.get('google_user', {})
         username = google_user.get('email', 'unknown')
 
-        data_store = UserDataStore(user_id=user_id, lastfm_username=username)
-        db_scrobbled, track_meta_map = data_store.get_scrobble_history()
-
         try:
             yt_history = ytmusic.get_history()
         except Exception as e:
             return jsonify({'error': 'YouTube Music session expired. Please re-paste headers in Accounts.'})
 
+        data_store = UserDataStore(user_id=user_id, lastfm_username=username)
+        visible_items = [item for item in yt_history[:30] if is_music_content(item)]
+        candidate_uids = []
+        for item in visible_items:
+            artists = item.get('artists', [])
+            artist = artists[0].get('name', 'Unknown') if artists else item.get('author') or item.get('artist') or 'Unknown'
+            clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
+            candidate_uids.extend(generate_track_uids(item.get('title', 'Unknown'), clean_artist, item.get('videoId')))
+        _, track_meta_map = data_store.get_scrobble_matches(candidate_uids)
+
         tracks = []
-        for item in yt_history[:30]:
-            if not is_music_content(item):
-                continue
+        for item in visible_items:
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
             artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
@@ -929,7 +984,8 @@ def history():
 
         return jsonify({'tracks': tracks})
     except Exception as e:
-        return jsonify({'error': str(e)})
+        print(f"[ERROR] History route failed: {e}")
+        return jsonify({'error': 'Could not load history'}), 502
 
 
 @app.route('/api/scrobble-single', methods=['POST'])
@@ -940,6 +996,9 @@ def scrobble_single():
     title = data.get('title')
     album = data.get('album', '')
     video_id = data.get('videoId')
+
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'success': False, 'error': 'Authentication required'}), 401
 
     if not artist or not title:
         return jsonify({'success': False, 'error': 'Artist and title required'}), 400
@@ -970,11 +1029,13 @@ def scrobble_single():
             track_uids = generate_track_uids(title, clean_artist, video_id)
             scrobble_meta = {
                 'timestamp': current_time,
+                'timestamp_confidence': 'exact',
                 'track_title': scrobble_title,
                 'artist': clean_artist
             }
+            if not data_store.save_scrobbles(track_uids, scrobble_meta):
+                raise RuntimeError('Scrobble reached Last.fm but could not be recorded locally')
             for uid in track_uids:
-                data_store.save_scrobble(uid, scrobble_meta)
                 data_store.mark_session_scrobbled(uid)
                 global_scrobble_session_cache[uid] = current_time
             
@@ -986,6 +1047,13 @@ def scrobble_single():
 
 @app.route('/api/reset-history', methods=['POST'])
 def reset_history():
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'success': False, 'error': 'Authentication required'}), 401
+    if (request.json or {}).get('confirmation') != 'DELETE SCROBBLE HISTORY':
+        return jsonify({
+            'success': False,
+            'error': 'Explicit confirmation is required because this can cause duplicate scrobbles.'
+        }), 400
     user_id = session.get('user_id')
     google_user = session.get('google_user', {})
     username = google_user.get('email', 'unknown')
@@ -1032,8 +1100,10 @@ def scrobble():
     username = google_user.get('email', 'unknown')
     config = _enrich_config_from_db(config, user_id)
 
-    # Prevent overlapping sync operations
-    if not sync_operation_lock.acquire(blocking=False):
+    # Prevent overlap for the same user without blocking unrelated users that
+    # happen to share a warm Fluid Compute instance.
+    operation_lock = user_sync_locks[user_id] if user_id else sync_operation_lock
+    if not operation_lock.acquire(blocking=False):
         return jsonify({'success': False, 'error': 'Sync already in progress'})
     
     try:
@@ -1045,43 +1115,9 @@ def scrobble():
         if not ytmusic:
             return jsonify({'success': False, 'error': ytmusic_error or 'YT Music not configured'})
 
-        if user_id:
-            update_user_last_sync(user_id)
-
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
         data_store.clear_session()
         
-        scrobbled_tracks, track_meta_map = data_store.get_scrobble_history()
-        
-        try:
-            authenticated_user = network.get_authenticated_user()
-            recent = network.get_user(authenticated_user).get_recent_tracks(limit=15)
-            lastfm_synced_count = 0
-            for r in recent:
-                track_uids = generate_track_uids(r.track.title, r.track.artist.name)
-                already_scrobbled, _ = is_track_scrobbled(track_uids, track_meta_map, data_store)
-                if already_scrobbled:
-                    continue
-                
-                try:
-                    lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
-                except (TypeError, ValueError):
-                    lfm_ts = int(time.time())
-
-                meta = {
-                    'timestamp': lfm_ts,
-                    'track_title': r.track.title,
-                    'artist': r.track.artist.name
-                }
-                for uid in track_uids:
-                    data_store.save_scrobble(uid, meta)
-                    track_meta_map[uid] = meta
-                lastfm_synced_count += 1
-            if lastfm_synced_count > 0:
-                print(f"[INFO] Synced {lastfm_synced_count} tracks from Last.fm history")
-        except Exception as e:
-            print(f"[WARN] Last.fm sync check failed: {e} — relying on DB-only deduplication")
-
         try:
             history = ytmusic.get_history()
         except Exception as e:
@@ -1090,12 +1126,23 @@ def scrobble():
 
         if not history:
             return jsonify({'success': True, 'count': 0, 'message': 'No history found'})
+
+        candidate_uids = []
+        for item in history[:30]:
+            artists = item.get('artists', [])
+            artist = artists[0].get('name', 'Unknown') if artists else item.get('author') or item.get('artist') or 'Unknown'
+            clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
+            candidate_uids.extend(generate_track_uids(item.get('title', 'Unknown'), clean_artist, item.get('videoId')))
+        _, track_meta_map = data_store.get_scrobble_matches(candidate_uids)
         
         scrobbled_count = 0
         scrobbled_video_ids = []
         current_time = int(time.time())
+        estimated_elapsed = 0
 
         for i, item in enumerate(history[:30]):
+            estimated_timestamp = current_time - estimated_elapsed
+            estimated_elapsed += max(30, min(get_track_duration(item), 30 * 60))
             if not is_music_content(item):
                 continue
             title = item.get('title', 'Unknown')
@@ -1128,8 +1175,9 @@ def scrobble():
 
             try:
                 with scrobble_lock:
-                    # Realistic 3-minute spacing per track backwards from current_time
-                    timestamp = current_time - (i * 180)
+                    # YT history has no playback timestamps; use cumulative track
+                    # durations as an explicit best-effort ordering estimate.
+                    timestamp = estimated_timestamp
                     network.scrobble(
                         artist=clean_artist,
                         title=scrobble_title,
@@ -1138,11 +1186,13 @@ def scrobble():
                     )
                     scrobble_meta = {
                         'timestamp': timestamp,
+                        'timestamp_confidence': 'estimated',
                         'track_title': scrobble_title,
                         'artist': clean_artist
                     }
+                    if not data_store.save_scrobbles(track_uids, scrobble_meta):
+                        raise RuntimeError('Scrobble reached Last.fm but could not be recorded locally')
                     for uid in track_uids:
-                        data_store.save_scrobble(uid, scrobble_meta)
                         data_store.mark_session_scrobbled(uid)
                         track_meta_map[uid] = scrobble_meta
                         global_scrobble_session_cache[uid] = current_time
@@ -1172,7 +1222,7 @@ def scrobble():
         add_sync_log("System", "Sync failed", status="Error")
         return jsonify({'success': False, 'error': str(e)})
     finally:
-        sync_operation_lock.release()
+        operation_lock.release()
 
 # 30 days inactivity threshold (1 month in seconds)
 INACTIVITY_AUTO_DISABLE_SECONDS = 30 * 24 * 60 * 60
@@ -1278,69 +1328,76 @@ class BackgroundScrobbler:
         global last_sync_time
         last_sync_time = int(time.time())
 
-        # DISTRIBUTED SYNC LOCK: claim this user's sync slot immediately.
-        # Cron workers on separate instances check last_sync_at before picking a user;
-        # updating it now prevents two instances from syncing the same user at once.
-        if user_id:
-            update_user_last_sync(user_id)
-        
         network, net_err = get_lastfm_network(config)
         ytmusic, yt_err = get_ytmusic_client(config)
         
         if not network:
-            print(f"[WARN] Background sync: Last.fm not available - {net_err}")
-            return 0
+            raise RuntimeError(f"Last.fm unavailable: {net_err or 'not configured'}")
         if not ytmusic:
-            print(f"[WARN] Background sync: YT Music not available - {yt_err}")
-            return 0
+            raise RuntimeError(f"YouTube Music unavailable: {yt_err or 'not configured'}")
         
         # Use UserDataStore for proper per-user isolation
         data_store = UserDataStore(user_id=user_id, lastfm_username=username)
         data_store.clear_session()
-        history_set, meta_map = data_store.get_scrobble_history()
-        
-        # Seed local history from Last.fm only if DB history is empty (cold start)
-        if not meta_map:
-            try:
-                lfm_user = username if username else network.get_authenticated_user()
-                recent = network.get_user(lfm_user).get_recent_tracks(limit=30)
-                for r in recent:
-                    track_uids = generate_track_uids(r.track.title, r.track.artist.name)
-                    already_scrobbled, _ = is_track_scrobbled(track_uids, meta_map, data_store)
-                    if already_scrobbled:
-                        continue
-                    try:
-                        lfm_ts = int(r.timestamp) if r.timestamp else int(time.time())
-                    except (TypeError, ValueError):
-                        lfm_ts = int(time.time())
-                    meta = {
-                        'timestamp': lfm_ts,
-                        'track_title': r.track.title,
-                        'artist': r.track.artist.name
-                    }
-                    data_store.save_scrobbles(track_uids, meta)
-                    for uid in track_uids:
-                        meta_map[uid] = meta
-            except Exception as e:
-                print(f"[BG] Last.fm sync check failed: {e} — relying on DB-only deduplication")
 
         try:
             history = ytmusic.get_history()
         except Exception as e:
-            print(f"[ERROR] Background sync: Failed to get history - {e}")
-            return 0
+            raise RuntimeError('YouTube Music session expired or history is unavailable') from e
         
         if not history:
             return 0
+
+        if config.get('baseline_history_on_next_sync'):
+            baseline_time = int(time.time())
+            baseline_count = 0
+            for item in history[:30]:
+                if not is_music_content(item):
+                    continue
+                title = item.get('title', 'Unknown')
+                artists = item.get('artists', [])
+                artist = artists[0].get('name', 'Unknown') if artists else item.get('author') or item.get('artist') or 'Unknown'
+                clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
+                aliases = generate_track_uids(title, clean_artist, item.get('videoId'))
+                if aliases and data_store.save_scrobbles(aliases, {
+                    'timestamp': baseline_time,
+                    'timestamp_confidence': 'estimated',
+                    'track_title': strip_title_variants(title) or title,
+                    'artist': clean_artist,
+                }):
+                    baseline_count += 1
+            config['baseline_history_on_next_sync'] = False
+            if not ConfigManager.save(config, user_id=user_id):
+                raise RuntimeError('History baseline was created but its completion flag could not be saved')
+            print(f"[INFO] Background Sync: Baseline captured ({baseline_count} existing tracks)")
+            add_sync_log('System', f'Baseline captured: {baseline_count} existing tracks', status='Done', user=username)
+            return 0
+
+        candidate_uids = []
+        for item in history[:15]:
+            if not is_music_content(item):
+                continue
+            artists = item.get('artists', [])
+            artist = artists[0].get('name', 'Unknown') if artists else item.get('author') or item.get('artist') or 'Unknown'
+            clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
+            candidate_uids.extend(generate_track_uids(item.get('title', 'Unknown'), clean_artist, item.get('videoId')))
+        _, meta_map = data_store.get_scrobble_matches(candidate_uids)
         
         current_time = int(time.time())
         scrobbled_count = 0
+        estimated_elapsed = 0
         
         # Process the 15 most recent items (was 3, then 10)
         for i, item in enumerate(history[:15]):
+            estimated_timestamp = current_time - estimated_elapsed
+            estimated_elapsed += max(30, min(get_track_duration(item), 30 * 60))
+            if not is_music_content(item):
+                continue
             title = item.get('title', 'Unknown')
             artists = item.get('artists', [])
-            artist = artists[0].get('name', 'Unknown') if artists else 'Unknown'
+            artist = artists[0].get('name', 'Unknown') if artists else item.get('author') or item.get('artist') or 'Unknown'
+            clean_artist = re.sub(r'\s*-\s*Topic$', '', str(artist), flags=re.IGNORECASE).strip()
+            clean_title = strip_title_variants(title) or title
             album = item.get('album', {}).get('name', '') if item.get('album') else ''
             video_id = item.get('videoId')
             
@@ -1348,7 +1405,7 @@ class BackgroundScrobbler:
                 continue
             
             # Generate ALL possible UIDs for bulletproof deduplication
-            track_uids = generate_track_uids(title, artist, video_id)
+            track_uids = generate_track_uids(title, clean_artist, video_id)
             
             # Check if ANY UID was already scrobbled
             already_scrobbled, matching_uid = is_track_scrobbled(track_uids, meta_map, data_store)
@@ -1357,29 +1414,30 @@ class BackgroundScrobbler:
                 print(f"[BG] Skip '{title}' - already_scrobbled (matched: {matching_uid})")
                 continue
             
-            print(f"[BG] New: '{title}' - first_play")
+            print(f"[BG] New: '{clean_title}' - first_play")
 
             try:
                 with scrobble_lock:
-                    # Space timestamps 1 minute apart so Last.fm doesn't deduplicate them
-                    timestamp = current_time - (i * 60)
+                    timestamp = estimated_timestamp
                     network.scrobble(
-                        artist=artist,
-                        title=title,
+                        artist=clean_artist,
+                        title=clean_title,
                         timestamp=timestamp,
                         album=album if album else None
                     )
                     scrobble_meta = {
                         'timestamp': timestamp,
-                        'track_title': title,
-                        'artist': artist
+                        'timestamp_confidence': 'estimated',
+                        'track_title': clean_title,
+                        'artist': clean_artist
                     }
                     # Save every UID alias in one DB request and immediately
                     # update the local map used for this sync run.
-                    data_store.save_scrobbles(track_uids, scrobble_meta)
+                    if not data_store.save_scrobbles(track_uids, scrobble_meta):
+                        raise RuntimeError('Scrobble reached Last.fm but persistence failed')
                     for uid in track_uids:
                         meta_map[uid] = scrobble_meta  # Always stays accurate
-                    add_sync_log(artist, title, status="Auto", user=username)
+                    add_sync_log(clean_artist, clean_title, status="Auto", user=username)
                     scrobbled_count += 1
             except pylast.WSError as e:
                 print(f"[BG] Last.fm API error: {e}")
@@ -1390,9 +1448,6 @@ class BackgroundScrobbler:
         
         if scrobbled_count > 0:
             print(f"[INFO] Background Sync: {scrobbled_count} tracks scrobbled for {username or 'local'}")
-        else:
-            # Automatic Smart Method: check if user has been inactive for > 30 days (1 month)
-            check_and_auto_disable_inactive_user(user_id, meta_map, config, username)
         
         return scrobbled_count
 
@@ -1438,10 +1493,11 @@ def cron_sync():
     """
     # REQUIRED: Verify cron secret for security
     cron_secret = os.environ.get('CRON_SECRET')
-    if cron_secret:
-        auth_header = request.headers.get('Authorization', '')
-        if f'Bearer {cron_secret}' != auth_header:
-            return jsonify({'error': 'Unauthorized'}), 401
+    if not cron_secret:
+        return jsonify({'error': 'CRON_SECRET is not configured'}), 503
+    auth_header = request.headers.get('Authorization', '')
+    if not secrets.compare_digest(f'Bearer {cron_secret}', auth_header):
+        return jsonify({'error': 'Unauthorized'}), 401
     
     # Parse pagination params for large-scale processing
     batch_size = min(int(request.args.get('batch_size', 50)), 100)  # Max 100 per batch
@@ -1460,61 +1516,45 @@ def cron_sync():
     }
     
     if is_multi_user_enabled():
-        # Multi-user mode: Process users in batches
-        total_active = get_active_users_count()
-        results['total_active_users'] = total_active
-        
-        print(f"[CRON] Starting sync: {total_active} active users, batch_size={batch_size}, offset={offset}")
-        
-        processed = 0
-        for user in iterate_active_users(batch_size=batch_size):
-            # Skip users before offset (allows distributed processing)
-            if processed < offset:
-                processed += 1
-                continue
-            
+        # The database atomically claims rows with FOR UPDATE SKIP LOCKED, so
+        # concurrent cron invocations cannot process the same user.
+        claimed_users = claim_active_users(limit=max_users, interval_seconds=300)
+        if claimed_users is None:
+            return jsonify({
+                'success': False,
+                'error': 'Database claim failed. Apply the sync-backend migration and check Supabase logs.'
+            }), 503
+        results['users_claimed'] = len(claimed_users)
+        for user_index, user in enumerate(claimed_users):
             # Check runtime limit
             if time.time() - start_time > max_runtime:
                 results['timeout'] = True
-                results['next_offset'] = processed
-                print(f"[CRON] Timeout reached after {processed} users")
+                for pending_user in claimed_users[user_index:]:
+                    release_user_claim(pending_user.get('id'), pending_user.get('sync_claim_token'))
                 break
-            
-            # Check max users limit
-            if results['users_processed'] >= max_users:
-                results['max_reached'] = True
-                results['next_offset'] = processed
-                print(f"[CRON] Max users limit reached: {max_users}")
-                break
-            
+
+            user_id = user.get('id')
+            claim_token = user.get('sync_claim_token')
+            previous_failures = user.get('consecutive_sync_failures') or 0
             try:
-                user_id = user.get('id')
                 username = user.get('lastfm_username') or user.get('google_email', 'unknown')
-                
-                # Build config from user's stored credentials
                 store = UserDataStore(user_id=user_id, lastfm_username=username)
                 config = store.get_config()
-                
-                # Double-check auto_scrobble is enabled
                 if not config.get('auto_scrobble', False):
-                    processed += 1
+                    finish_user_sync(user_id, claim_token, error='Auto-scrobble disabled during claim', previous_failures=previous_failures)
                     continue
-                
+
                 count = bg_scrobbler._perform_sync(config, user_id=user_id, username=username)
                 results['users_processed'] += 1
                 results['total_scrobbled'] += count
-                
-                # Update last sync time
-                update_user_last_sync(user_id)
-                
+                finish_user_sync(user_id, claim_token)
             except Exception as e:
                 error_msg = f"{user.get('google_email', 'unknown')}: {str(e)[:100]}"
                 print(f"[CRON] Error: {error_msg}")
                 results['errors'].append(error_msg)
+                finish_user_sync(user_id, claim_token, error=str(e), previous_failures=previous_failures)
                 if len(results['errors']) > 10:
                     results['errors'] = results['errors'][:10] + ['... truncated']
-            
-            processed += 1
         
         results['runtime_seconds'] = round(time.time() - start_time, 2)
         
@@ -1559,10 +1599,28 @@ def handle_config():
                 merged_sub = dict(existing[key])
                 merged_sub.update(new_config[key])  # explicit nulls overwrite (allows clearing)
                 merged_config[key] = merged_sub
-        ConfigManager.save(merged_config, user_id=user_id)
+        credentials_changed = 'lastfm' in new_config or 'ytmusic' in new_config
+        if isinstance(new_config.get('ytmusic'), dict) and new_config['ytmusic'].get('headers'):
+            # YouTube does not provide reliable playback timestamps here. Treat
+            # the current history snapshot as a baseline after reconnecting so
+            # months-old items are not submitted as brand-new plays.
+            merged_config['baseline_history_on_next_sync'] = True
+        if not ConfigManager.save(merged_config, user_id=user_id):
+            return jsonify({'success': False, 'error': 'Could not persist configuration'}), 502
+        if credentials_changed:
+            reset_user_sync_health(user_id)
         return jsonify({'success': True})
     
-    return jsonify(ConfigManager.load(user_id=user_id))
+    config = ConfigManager.load(user_id=user_id) or {}
+    lastfm = config.get('lastfm', {})
+    ytmusic = config.get('ytmusic', {})
+    return jsonify({
+        'lastfm_configured': all(lastfm.get(key) for key in ('api_key', 'api_secret', 'session_key')),
+        'lastfm_api_configured': all(lastfm.get(key) for key in ('api_key', 'api_secret')),
+        'ytmusic_configured': bool(ytmusic.get('headers')),
+        'auto_scrobble': config.get('auto_scrobble', False),
+        'interval': config.get('interval', 300)
+    })
 
 
 @app.route('/api/lastfm-callback')
@@ -1573,11 +1631,32 @@ def lastfm_callback():
     return 'No token', 400
 
 
+@app.route('/api/lastfm-auth-url')
+def lastfm_auth_url():
+    """Build an authorization URL using server-stored API credentials."""
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'error': 'Authentication required'}), 401
+    config = _enrich_config_from_db({}, session.get('user_id'))
+    api_key = config.get('lastfm', {}).get('api_key')
+    if not api_key:
+        return jsonify({'error': 'Save the Last.fm API key and secret first'}), 400
+    callback = request.host_url.rstrip('/') + '/api/lastfm-callback'
+    return jsonify({'url': 'https://www.last.fm/api/auth/?' + urllib.parse.urlencode({
+        'api_key': api_key,
+        'cb': callback,
+    })})
+
+
 @app.route('/api/lastfm-session', methods=['POST'])
+@rate_limit('auth')
 def lastfm_session():
+    if is_multi_user_enabled() and not session.get('logged_in'):
+        return jsonify({'error': 'Authentication required'}), 401
     data = request.json or {}
-    api_key = data.get('api_key')
-    api_secret = data.get('api_secret')
+    stored_config = _enrich_config_from_db({}, session.get('user_id'))
+    stored_lastfm = stored_config.get('lastfm', {})
+    api_key = data.get('api_key') or stored_lastfm.get('api_key')
+    api_secret = data.get('api_secret') or stored_lastfm.get('api_secret')
     token = data.get('token')
     
     if not all([api_key, api_secret, token]):
@@ -1602,14 +1681,32 @@ def lastfm_session():
         
         result = response.json()
         if 'session' in result:
+            session_key = result['session']['key']
+            username = result['session']['name']
+
+            # Do not claim success until Last.fm accepts this exact API
+            # key/secret/session combination in an authenticated request.
+            validated_username = validate_lastfm_session(api_key, api_secret, session_key)
+            user_id = session.get('user_id')
+            persisted = stored_config or {}
+            persisted['lastfm'] = {
+                'api_key': api_key,
+                'api_secret': api_secret,
+                'session_key': session_key,
+            }
+            if not ConfigManager.save(persisted, user_id=user_id):
+                return jsonify({'error': 'Last.fm authorized, but credentials could not be saved'}), 502
+            reset_user_sync_health(user_id)
             return jsonify({
-                'session_key': result['session']['key'],
-                'username': result['session']['name']
+                'success': True,
+                'username': validated_username or username,
+                'session_stored': True,
             })
         else:
             return jsonify({'error': result.get('message', 'Failed')})
     except Exception as e:
-        return jsonify({'error': str(e)})
+        print(f"[ERROR] Last.fm session exchange failed: {e}")
+        return jsonify({'error': 'Last.fm authorization failed'}), 502
 
 
 @app.route('/icon.png')

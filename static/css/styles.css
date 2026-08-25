@@ -740,6 +740,12 @@ body {
     color: var(--success);
 }
 
+.sync-info.error {
+    color: var(--danger);
+    max-width: 55%;
+    text-align: right;
+}
+
 /* Connection Status Row */
 .status-item {
     display: flex;
@@ -892,6 +898,55 @@ body {
 /* Form Inputs */
 .form-group {
     margin-bottom: 20px;
+}
+
+.account-connected-panel {
+    align-items: center;
+    gap: 14px;
+    padding: 18px;
+    border: 1px solid rgba(16, 185, 129, 0.28);
+    border-radius: var(--radius-sm);
+    background: rgba(16, 185, 129, 0.08);
+}
+
+.account-connected-panel.needs-attention {
+    border-color: rgba(245, 158, 11, 0.3);
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.account-connected-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    color: var(--success);
+    background: rgba(16, 185, 129, 0.16);
+    font-weight: 800;
+}
+
+.needs-attention .account-connected-icon {
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.16);
+}
+
+.account-connected-copy {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.account-connected-copy strong { color: var(--text-primary); font-size: 14px; }
+.account-connected-copy span { color: var(--text-secondary); font-size: 12px; }
+.account-connected-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+@media (max-width: 640px) {
+    .account-connected-panel { align-items: flex-start; flex-wrap: wrap; }
+    .account-connected-actions { width: 100%; }
+    .account-connected-actions .btn { flex: 1; }
 }
 
 .form-label {
@@ -1157,6 +1212,35 @@ body {
 }
 
 /* Guide Accordion */
+.guide-intro {
+    margin: 0 0 18px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.65;
+}
+
+.credential-status-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    margin-top: 7px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.credential-status-list span {
+    white-space: nowrap;
+}
+
+.credential-status-list b {
+    color: var(--success);
+}
+
+.account-connected-panel.needs-attention #lastfm-session-status,
+.account-connected-panel.needs-attention #lastfm-session-status b {
+    color: #f59e0b;
+}
+
 .guide-step {
     border: 1px solid var(--border);
     border-radius: var(--radius-md);

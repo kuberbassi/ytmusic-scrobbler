@@ -3,12 +3,18 @@
 document.getElementById('year').textContent = new Date().getFullYear();
 
 // Toast Notifications
+const escapeHtml = value => String(value ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
 function toast(msg, type = 'success') {
     const container = document.getElementById('toasts');
     if (!container) return;
     const toastEl = document.createElement('div');
     toastEl.className = `toast ${type}`;
-    toastEl.innerHTML = `<span class="toast-dot"></span>${msg}`;
+    const dot = document.createElement('span');
+    dot.className = 'toast-dot';
+    toastEl.append(dot, document.createTextNode(String(msg)));
     container.appendChild(toastEl);
     requestAnimationFrame(() => toastEl.classList.add('show'));
     setTimeout(() => {
@@ -46,14 +52,12 @@ function showTab(id) {
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     const target = document.getElementById(id);
     if (target) target.classList.add('active');
+    if (id === 'history') loadHistory();
 }
 
 // Configuration accessor
 function getConfig() {
-    return {
-        lastfm: JSON.parse(localStorage.getItem('lastfm') || '{}'),
-        ytmusic: JSON.parse(localStorage.getItem('ytmusic') || '{}')
-    };
+    return {};
 }
 
 // Logging helper
@@ -61,18 +65,23 @@ function log(msg) {
     const l = document.getElementById('log');
     if (!l) return;
     const time = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-    l.innerHTML = `<div class="log-entry"><span class="time">[${time}]</span> ${msg}</div>` + l.innerHTML;
+    l.insertAdjacentHTML('afterbegin', `<div class="log-entry"><span class="time">[${time}]</span> ${escapeHtml(msg)}</div>`);
 }
 
 let lastSyncTimestamp = 0;
-async function checkStatus() {
+let statusRequestInFlight = false;
+let lastValidatedAt = 0;
+async function checkStatus(validate = false) {
+    if (statusRequestInFlight || document.hidden) return;
+    statusRequestInFlight = true;
     try {
-        const res = await fetch('/api/status', {
+        const res = await fetch(`/api/status${validate ? '?validate=1' : ''}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(getConfig())
         });
         const data = await res.json();
+        if (validate) lastValidatedAt = Date.now();
 
         // Update Logs
         if (data.logs && data.logs.length > 0) {
@@ -83,8 +92,8 @@ async function checkStatus() {
                     const statusClass = (entry.status && entry.status.includes('Error')) ? 'error' : '';
                     return `<div class="log-entry ${statusClass}">
                         <span class="time">[${time}]</span> 
-                        <b>${entry.artist}</b> - ${entry.title} 
-                        &nbsp;<span style="font-size:10px;color:var(--text-tertiary);float:right;">${entry.status}</span>
+                        <b>${escapeHtml(entry.artist)}</b> - ${escapeHtml(entry.title)}
+                        &nbsp;<span style="font-size:10px;color:var(--text-tertiary);float:right;">${escapeHtml(entry.status)}</span>
                     </div>`;
                 }).join('');
             }
@@ -92,7 +101,8 @@ async function checkStatus() {
 
         if (data.last_sync > lastSyncTimestamp) {
             lastSyncTimestamp = data.last_sync;
-            loadHistory();
+            const historyTab = document.getElementById('history');
+            if (historyTab && historyTab.classList.contains('active')) loadHistory();
         }
 
         // Update Status Badges & Nav Pill
@@ -100,18 +110,21 @@ async function checkStatus() {
         const lfmNav = document.getElementById('nav-lfm');
         const lfmSub = document.getElementById('lastfm-username');
 
-        if (lfm) {
+        if (lfm && (data.lastfm.validated || lastfmConnectionValid === null)) {
             if (data.lastfm.connected) {
+                lastfmConnectionValid = true;
                 lfm.innerHTML = '<span class="dot"></span> Online';
                 lfm.className = 'status-badge online';
                 if (lfmNav) lfmNav.className = 'nav-status-pill online';
                 if (lfmSub) lfmSub.textContent = `@${data.lastfm.username || 'Authorized'}`;
             } else {
+                lastfmConnectionValid = false;
                 lfm.innerHTML = '<span class="dot"></span> Offline';
                 lfm.className = 'status-badge offline';
                 if (lfmNav) lfmNav.className = 'nav-status-pill';
-                if (lfmSub) lfmSub.textContent = 'Not connected';
+                if (lfmSub) lfmSub.textContent = data.lastfm.error || 'Credentials required';
             }
+            updateLastfmState();
         }
 
         const ytm = document.getElementById('ytmusic-status');
@@ -128,7 +141,7 @@ async function checkStatus() {
                 ytm.innerHTML = '<span class="dot"></span> Offline';
                 ytm.className = 'status-badge offline';
                 if (ytmNav) ytmNav.className = 'nav-status-pill';
-                if (ytmSub) ytmSub.textContent = 'Headers required';
+                if (ytmSub) ytmSub.textContent = data.ytmusic.error || 'Headers required';
             }
         }
 
@@ -136,52 +149,134 @@ async function checkStatus() {
         const syncInfo = document.getElementById('sync-info');
         const npText = document.getElementById('now-playing-text');
 
-        if (syncInfo && data.last_sync > 0) {
+        if (syncInfo && data.sync_error) {
+            syncInfo.textContent = `Auto-sync needs attention: ${data.sync_error}`;
+            syncInfo.className = 'sync-info error';
+        } else if (syncInfo && data.last_sync > 0) {
             const diff = Math.floor((data.now - data.last_sync) / 60);
             const syncText = diff === 0 ? 'Synced just now' : `Synced ${diff}m ago`;
             syncInfo.innerText = syncText;
             syncInfo.className = 'sync-info active';
             if (data.last_track && npText) {
-                npText.innerHTML = `Last Scrobbled: <strong>${data.last_track}</strong>`;
+                npText.innerHTML = `Last Scrobbled: <strong>${escapeHtml(data.last_track)}</strong>`;
             }
         } else if (syncInfo) {
             syncInfo.innerText = 'Waiting for first sync...';
             syncInfo.className = 'sync-info';
         }
-    } catch (e) { console.error('Status check failed', e); }
+    } catch (e) {
+        console.error('Status check failed', e);
+    } finally {
+        statusRequestInFlight = false;
+    }
 }
 
 // Save Last.fm Configuration
 async function saveLastfm() {
+    const sessionKey = document.getElementById('lastfm-session').value.trim();
     const config = {
         api_key: document.getElementById('lastfm-key').value.trim(),
         api_secret: document.getElementById('lastfm-secret').value.trim(),
-        session_key: document.getElementById('lastfm-session').value.trim()
+        ...(sessionKey ? { session_key: sessionKey } : {})
     };
     if (!config.api_key || !config.api_secret) return toast('Enter API key and secret', 'error');
-    localStorage.setItem('lastfm', JSON.stringify(config));
+    const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lastfm: config })
+    });
+    if (!res.ok) return toast('Could not save Last.fm account', 'error');
+    document.getElementById('lastfm-key').value = '';
+    document.getElementById('lastfm-secret').value = '';
+    document.getElementById('lastfm-session').value = '';
 
-    await saveConfigToServer();
+    lastfmApiConfigured = true;
+    lastfmSessionConfigured = Boolean(sessionKey) || lastfmSessionConfigured;
+    lastfmEditing = false;
+    updateLastfmState();
 
     toast('Last.fm account saved!');
     log('Last.fm config saved');
-    checkStatus();
+    checkStatus(true);
+}
+
+let lastfmApiConfigured = false;
+let lastfmSessionConfigured = false;
+let lastfmConnectionValid = null;
+let lastfmEditing = false;
+
+function getLastfmAuthorizationNotice() {
+    try {
+        return JSON.parse(sessionStorage.getItem('lastfm-authorization-success') || 'null');
+    } catch {
+        return null;
+    }
+}
+
+function updateLastfmState() {
+    const form = document.getElementById('lastfm-form');
+    const panel = document.getElementById('lastfm-connected-panel');
+    const title = document.getElementById('lastfm-connected-title');
+    const description = document.getElementById('lastfm-connected-description');
+    const sessionStatus = document.getElementById('lastfm-session-status');
+    const cancel = document.getElementById('lastfm-cancel-edit');
+    const showPanel = lastfmApiConfigured && !lastfmEditing;
+    if (form) form.style.display = showPanel ? 'none' : 'block';
+    if (panel) {
+        panel.style.display = showPanel ? 'flex' : 'none';
+        const needsAttention = lastfmConnectionValid === false || !lastfmSessionConfigured;
+        panel.classList.toggle('needs-attention', needsAttention);
+        const icon = panel.querySelector('.account-connected-icon');
+        if (icon) icon.textContent = needsAttention ? '!' : '✓';
+        const authorizationNotice = !needsAttention && getLastfmAuthorizationNotice();
+        if (title) title.textContent = needsAttention
+            ? 'Last.fm authorization required'
+            : authorizationNotice
+                ? 'Last.fm authorization successful'
+                : 'Last.fm connected';
+        if (description) description.textContent = needsAttention
+            ? 'Your API credentials are saved securely. Reauthorize the Last.fm session.'
+            : authorizationNotice
+                ? `Session key received${authorizationNotice.username ? ` for ${authorizationNotice.username}` : ''} and stored securely. It is intentionally hidden.`
+                : 'API key, secret, and session key are stored securely. The secret values are intentionally hidden.';
+        if (sessionStatus) sessionStatus.innerHTML = needsAttention
+            ? '<b>!</b> Session key authorization required'
+            : '<b>✓</b> Session key received and saved securely';
+    }
+    if (cancel) cancel.style.display = lastfmEditing && lastfmApiConfigured ? 'inline-flex' : 'none';
+}
+
+function showLastfmEditor() {
+    lastfmEditing = true;
+    updateLastfmState();
+    document.getElementById('lastfm-key')?.focus();
+}
+
+function cancelLastfmEditor() {
+    lastfmEditing = false;
+    for (const id of ['lastfm-key', 'lastfm-secret', 'lastfm-session']) {
+        const input = document.getElementById(id);
+        if (input) input.value = '';
+    }
+    updateLastfmState();
 }
 
 // Disconnect YouTube Music
 async function disconnectYT() {
-    localStorage.removeItem('yt_headers');
-    localStorage.removeItem('ytmusic');
-
     try {
-        await fetch('/api/config', {
+        const response = await fetch('/api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ytmusic: { headers: null } })
         });
-    } catch (e) { console.error("Failed to clear YT config on server", e); }
+        if (!response.ok) throw new Error('Server rejected configuration update');
+    } catch (e) {
+        console.error("Failed to clear YT config on server", e);
+        return toast('Could not disconnect YouTube Music', 'error');
+    }
 
     toast('Disconnected from YouTube', 'info');
+    ytmusicConfigured = false;
     log('Disconnected YouTube Music');
     checkStatus();
     updateYTState();
@@ -192,27 +287,31 @@ async function saveYTHeaders() {
     const headers = document.getElementById('yt-headers').value.trim();
     if (!headers) return toast('Paste headers first', 'error');
 
-    localStorage.setItem('yt_headers', headers);
-    localStorage.setItem('ytmusic', JSON.stringify({ headers: headers }));
-
-    await saveConfigToServer();
+    const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ytmusic: { headers } })
+    });
+    if (!res.ok) return toast('Could not save YouTube Music headers', 'error');
+    document.getElementById('yt-headers').value = '';
+    ytmusicConfigured = true;
 
     toast('Headers connected!');
     log('YouTube Music connected');
 
     updateYTState();
-    checkStatus();
+    checkStatus(true);
     setTimeout(loadHistory, 300);
 }
 
 // Update YouTube State
+let ytmusicConfigured = false;
 function updateYTState() {
-    const headers = localStorage.getItem('yt_headers');
     const disconnectBtn = document.getElementById('disconnect-btn');
     const headerSection = document.getElementById('method-headers');
 
     if (disconnectBtn && headerSection) {
-        if (headers) {
+        if (ytmusicConfigured) {
             disconnectBtn.style.display = 'inline-flex';
             headerSection.style.display = 'none';
         } else {
@@ -222,16 +321,51 @@ function updateYTState() {
     }
 }
 
-// Authorize Last.fm Popup
-function authorizeLastfm() {
+// Authorize Last.fm Popup. Stored credentials are used server-side after the
+// first save, so reconnecting never requires secrets to be returned to JS.
+async function authorizeLastfm() {
     const key = document.getElementById('lastfm-key').value.trim();
-    if (!key) return toast('Enter API key first', 'error');
-    const cb = encodeURIComponent(window.location.origin + '/api/lastfm-callback');
-    window.open(`https://www.last.fm/api/auth/?api_key=${key}&cb=${cb}`, 'lastfm', 'width=500,height=600');
+    const secret = document.getElementById('lastfm-secret').value.trim();
+    if (key) {
+        if (!secret) return toast('Enter the API secret before authorizing', 'error');
+
+        // Open synchronously so browsers do not block the popup while credentials save.
+        const authWindow = window.open('', 'lastfm', 'width=500,height=600');
+        try {
+            const saveResponse = await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lastfm: { api_key: key, api_secret: secret, session_key: null } })
+            });
+            if (!saveResponse.ok) throw new Error('Could not save credentials');
+            lastfmApiConfigured = true;
+            lastfmSessionConfigured = false;
+            lastfmConnectionValid = false;
+            try { sessionStorage.removeItem('lastfm-authorization-success'); } catch { /* optional */ }
+            updateLastfmState();
+            toast('Credentials saved. Continue authorization in the popup.');
+            const cb = encodeURIComponent(window.location.origin + '/api/lastfm-callback');
+            const authUrl = `https://www.last.fm/api/auth/?api_key=${encodeURIComponent(key)}&cb=${cb}`;
+            if (authWindow) authWindow.location.href = authUrl;
+            else window.location.href = authUrl;
+        } catch {
+            if (authWindow) authWindow.close();
+            toast('Could not save Last.fm credentials', 'error');
+        }
+        return;
+    }
+    try {
+        const res = await fetch('/api/lastfm-auth-url');
+        const data = await res.json();
+        if (!res.ok || !data.url) return toast(data.error || 'Save Last.fm credentials first', 'error');
+        window.open(data.url, 'lastfm', 'width=500,height=600');
+    } catch {
+        toast('Could not start Last.fm authorization', 'error');
+    }
 }
 
 window.addEventListener('message', async (e) => {
-    if (e.data.type === 'lastfm-token') {
+    if (e.origin === window.location.origin && e.data?.type === 'lastfm-token') {
         const key = document.getElementById('lastfm-key').value.trim();
         const secret = document.getElementById('lastfm-secret').value.trim();
         try {
@@ -241,11 +375,16 @@ window.addEventListener('message', async (e) => {
                 body: JSON.stringify({ api_key: key, api_secret: secret, token: e.data.token })
             });
             const data = await res.json();
-            if (data.session_key) {
-                document.getElementById('lastfm-session').value = data.session_key;
+            if (data.success && data.session_stored) {
+                try {
+                    sessionStorage.setItem('lastfm-authorization-success', JSON.stringify({ username: data.username || '' }));
+                } catch { /* The connected state still confirms success when storage is unavailable. */ }
                 toast('Authorized as ' + data.username);
                 log('Last.fm: Authorized as ' + data.username);
-                saveLastfm();
+                document.getElementById('lastfm-secret').value = '';
+                document.getElementById('lastfm-session').value = '';
+                await loadConfig();
+                checkStatus(true);
             } else toast(data.error || 'Failed', 'error');
         } catch { toast('Auth failed', 'error'); }
     }
@@ -297,8 +436,13 @@ async function scrobbleNow() {
         } else {
             toast(data.error || 'Failed', 'error');
             log('Error: ' + (data.error || 'Failed'));
+            checkStatus(true);
         }
-    } catch (e) { toast('Scrobble error', 'error'); log('Scrobble error'); }
+    } catch (e) {
+        toast('Scrobble error', 'error');
+        log('Scrobble error');
+        checkStatus(true);
+    }
     finally {
         if (btn) { btn.disabled = false; btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Scrobble Now'; }
     }
@@ -317,7 +461,7 @@ async function loadHistory() {
             body: JSON.stringify(getConfig())
         });
         const data = await res.json();
-        if (data.error) return list.innerHTML = `<div class="empty">${data.error}</div>`;
+        if (data.error) return list.innerHTML = `<div class="empty">${escapeHtml(data.error)}</div>`;
         if (!data.tracks?.length) return list.innerHTML = '<div class="empty">No watch history found</div>';
 
         // Merge recently scrobbled video IDs so badges never revert to pending
@@ -389,6 +533,13 @@ async function scrobbleSingle(idx, btnEl) {
             if (btnEl) { btnEl.textContent = 'Re-scrobble'; btnEl.disabled = false; }
         } else {
             toast(data.error || 'Scrobble failed', 'error');
+            if (/invalid session key|re-authenticate/i.test(data.error || '')) {
+                lastfmConnectionValid = false;
+                lastfmSessionConfigured = false;
+                try { sessionStorage.removeItem('lastfm-authorization-success'); } catch { /* optional */ }
+                updateLastfmState();
+                toast('Last.fm authorization expired. Open Accounts and select Reauthorize.', 'error');
+            }
             if (btnEl) { btnEl.disabled = false; btnEl.textContent = 'Try Again'; }
         }
     } catch (e) {
@@ -436,38 +587,41 @@ async function toggleAuto() {
     if (isEnabled) {
         toggle.classList.add('active');
         localStorage.setItem('autoScrobble', 'true');
-        log('Auto Scrobble Engine: ON');
-        toast('Server Auto Scrobble ON');
     } else {
         toggle.classList.remove('active');
         localStorage.setItem('autoScrobble', 'false');
-        log('Auto Scrobble Engine: OFF');
-        toast('Server Auto Scrobble OFF', 'info');
     }
 
-    await saveConfigToServer();
+    if (!await saveConfigToServer()) {
+        toggle.classList.toggle('active', !isEnabled);
+        localStorage.setItem('autoScrobble', isEnabled ? 'false' : 'true');
+        toast('Could not update Auto Scrobble', 'error');
+        return;
+    }
+    log(`Auto Scrobble Engine: ${isEnabled ? 'ON' : 'OFF'}`);
+    toast(`Server Auto Scrobble ${isEnabled ? 'ON' : 'OFF'}`, isEnabled ? 'success' : 'info');
 }
 
 // Server Config Sync
 async function saveConfigToServer() {
-    const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
-    const yt_headers = localStorage.getItem('yt_headers');
     const auto_scrobble = localStorage.getItem('autoScrobble') === 'true';
 
     const config = {
-        lastfm: lastfm,
-        ...(yt_headers ? { ytmusic: { headers: yt_headers } } : {}),
         auto_scrobble: auto_scrobble,
         interval: 300
     };
 
     try {
-        await fetch('/api/config', {
+        const response = await fetch('/api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
         });
-    } catch (e) { console.error("Sync to server failed", e); }
+        return response.ok;
+    } catch (e) {
+        console.error("Sync to server failed", e);
+        return false;
+    }
 }
 
 // Load Config
@@ -476,22 +630,23 @@ async function loadConfig() {
         const res = await fetch('/api/config');
         const config = await res.json();
 
-        if (config.lastfm) {
-            localStorage.setItem('lastfm', JSON.stringify(config.lastfm));
-            const keyEl = document.getElementById('lastfm-key');
-            const secretEl = document.getElementById('lastfm-secret');
-            const sessionEl = document.getElementById('lastfm-session');
-            if (keyEl) keyEl.value = config.lastfm.api_key || '';
-            if (secretEl) secretEl.value = config.lastfm.api_secret || '';
-            if (sessionEl) sessionEl.value = config.lastfm.session_key || '';
+        localStorage.removeItem('lastfm');
+        localStorage.removeItem('yt_headers');
+        localStorage.removeItem('ytmusic');
+        ytmusicConfigured = Boolean(config.ytmusic_configured);
+        lastfmApiConfigured = Boolean(config.lastfm_api_configured);
+        lastfmSessionConfigured = Boolean(config.lastfm_configured);
+        const keyInput = document.getElementById('lastfm-key');
+        const secretInput = document.getElementById('lastfm-secret');
+        const sessionInput = document.getElementById('lastfm-session');
+        if (config.lastfm_api_configured) {
+            if (keyInput) keyInput.placeholder = 'Saved securely — leave blank to keep';
+            if (secretInput) secretInput.placeholder = 'Saved securely — leave blank to keep';
         }
-
-        if (config.ytmusic?.headers) {
-            localStorage.setItem('yt_headers', config.ytmusic.headers);
-            localStorage.setItem('ytmusic', JSON.stringify({ headers: config.ytmusic.headers }));
-            const ytEl = document.getElementById('yt-headers');
-            if (ytEl) ytEl.value = config.ytmusic.headers;
+        if (config.lastfm_configured && sessionInput) {
+            sessionInput.placeholder = 'Authorized — stored securely';
         }
+        updateLastfmState();
 
         if (config.auto_scrobble !== undefined) {
             localStorage.setItem('autoScrobble', config.auto_scrobble ? 'true' : 'false');
@@ -499,22 +654,8 @@ async function loadConfig() {
             if (toggle) toggle.classList.toggle('active', config.auto_scrobble);
         }
     } catch (e) {
-        console.error("Failed to load server config, using local storage", e);
-        const lastfm = JSON.parse(localStorage.getItem('lastfm') || '{}');
-        const yt_headers = localStorage.getItem('yt_headers');
-        const autoEnabled = localStorage.getItem('autoScrobble') === 'true';
-
-        const keyEl = document.getElementById('lastfm-key');
-        const secretEl = document.getElementById('lastfm-secret');
-        const sessionEl = document.getElementById('lastfm-session');
-        const ytEl = document.getElementById('yt-headers');
-        const toggle = document.getElementById('auto-toggle');
-
-        if (keyEl && lastfm.api_key) keyEl.value = lastfm.api_key;
-        if (secretEl && lastfm.api_secret) secretEl.value = lastfm.api_secret;
-        if (sessionEl && lastfm.session_key) sessionEl.value = lastfm.session_key;
-        if (ytEl && yt_headers) ytEl.value = yt_headers;
-        if (toggle && autoEnabled) toggle.classList.add('active');
+        console.error("Failed to load server config", e);
+        toast('Could not load server configuration', 'error');
     }
 
     updateYTState();
@@ -547,8 +688,8 @@ async function checkLoginState() {
             if (userArea) {
                 userArea.innerHTML = `
                     <div class="user-menu">
-                        <img class="user-avatar" src="${data.user.picture || '/Icon.png'}" alt="">
-                        <span class="user-name">${data.user.name || data.user.email}</span>
+                        <img class="user-avatar" src="${escapeHtml(data.user.picture || '/Icon.png')}" alt="">
+                        <span class="user-name">${escapeHtml(data.user.name || data.user.email)}</span>
                         <a href="/auth/logout" class="logout-btn">Logout</a>
                     </div>
                 `;
@@ -574,28 +715,20 @@ if (urlParams.get('google_auth')) {
 
 // Init App
 document.addEventListener('DOMContentLoaded', () => {
-    checkLoginState().then(() => {
+    checkLoginState().then(async () => {
         const mainApp = document.getElementById('main-app');
         if (mainApp && mainApp.style.display !== 'none') {
-            loadConfig();
-            checkStatus();
-            loadHistory();
+            await loadConfig();
+            await checkStatus(true);
         }
     });
 
-    // Polling status every 5 seconds
-    setInterval(() => {
-        const mainApp = document.getElementById('main-app');
-        if (mainApp && mainApp.style.display !== 'none') {
-            checkStatus();
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            const shouldValidate = Date.now() - lastValidatedAt > 5 * 60 * 1000;
+            checkStatus(shouldValidate);
+            const historyTab = document.getElementById('history');
+            if (historyTab && historyTab.classList.contains('active')) loadHistory();
         }
-    }, 5000);
-
-    // Polling history every 10 seconds on history tab
-    setInterval(() => {
-        const historyTab = document.getElementById('history');
-        if (historyTab && historyTab.classList.contains('active')) {
-            loadHistory();
-        }
-    }, 10000);
+    });
 });

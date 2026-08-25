@@ -5,11 +5,9 @@
 -- ============================================================================
 
 -- ============================================================================
--- CLEAN SLATE: Drop existing tables (ONLY if no data to preserve)
+-- WARNING: This file is for a brand-new project only.
+-- Existing deployments must use supabase/migrations instead.
 -- ============================================================================
-DROP VIEW IF EXISTS active_users_stats;
-DROP TABLE IF EXISTS scrobbles CASCADE;
-DROP TABLE IF EXISTS users CASCADE;
 
 -- Users table - Google OAuth as primary identity
 CREATE TABLE users (
@@ -40,6 +38,12 @@ CREATE TABLE users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_sync_at TIMESTAMP WITH TIME ZONE,
+    sync_claimed_at TIMESTAMP WITH TIME ZONE,
+    sync_claim_token UUID,
+    last_sync_attempt_at TIMESTAMP WITH TIME ZONE,
+    last_sync_success_at TIMESTAMP WITH TIME ZONE,
+    last_sync_error TEXT,
+    consecutive_sync_failures INTEGER NOT NULL DEFAULT 0,
     last_login_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -49,7 +53,7 @@ CREATE TABLE scrobbles (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     
     -- Track info
-    track_uid VARCHAR(255) NOT NULL,  -- videoId or title_artist hash
+    track_uid VARCHAR(512) NOT NULL,  -- videoId or bounded title_artist identity
     track_title VARCHAR(500),
     artist VARCHAR(500),
     album VARCHAR(500),
@@ -57,6 +61,9 @@ CREATE TABLE scrobbles (
     -- Scrobble metadata
     last_scrobble_time BIGINT NOT NULL,  -- Unix timestamp
     scrobble_count INTEGER DEFAULT 1,
+    observed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    timestamp_confidence TEXT NOT NULL DEFAULT 'estimated'
+        CHECK (timestamp_confidence IN ('exact', 'estimated')),
     
     -- Timestamps
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -120,19 +127,17 @@ CREATE TRIGGER update_scrobbles_updated_at
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE scrobbles ENABLE ROW LEVEL SECURITY;
 
--- Service role bypasses RLS, so these policies are for extra safety
-CREATE POLICY "Service role full access to users" ON users
-    FOR ALL USING (true) WITH CHECK (true);
-
-CREATE POLICY "Service role full access to scrobbles" ON scrobbles
-    FOR ALL USING (true) WITH CHECK (true);
+-- Only the server-side service_role accesses these credential-bearing tables.
+-- Do not add permissive anon/authenticated policies here.
+REVOKE ALL ON users FROM anon, authenticated;
+REVOKE ALL ON scrobbles FROM anon, authenticated;
 
 -- ============================================================================
 -- USEFUL VIEWS (Optional - for admin dashboard)
 -- ============================================================================
 
 -- Active users stats view
-CREATE OR REPLACE VIEW active_users_stats AS
+CREATE OR REPLACE VIEW active_users_stats WITH (security_invoker = true) AS
 SELECT 
     COUNT(*) FILTER (WHERE is_active = true) as total_active,
     COUNT(*) FILTER (WHERE is_active = true AND (settings->>'auto_scrobble') = 'true') as auto_scrobble_enabled,
@@ -141,6 +146,8 @@ SELECT
     COUNT(*) FILTER (WHERE last_sync_at > NOW() - INTERVAL '1 hour') as synced_last_hour,
     COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as new_today
 FROM users;
+
+REVOKE ALL ON active_users_stats FROM anon, authenticated;
 
 -- ============================================================================
 -- MIGRATION: If upgrading from old schema (lastfm_username based)
