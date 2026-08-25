@@ -113,6 +113,13 @@ node --check static/js/app.js
 git diff --check
 ```
 
+## Machine-readable information
+
+- [`llms.txt`](https://ytscrobbler.kuberbassi.com/llms.txt) provides a concise product index for AI systems.
+- [`llms-full.txt`](https://ytscrobbler.kuberbassi.com/llms-full.txt) documents capabilities, limitations, architecture, security, and creator context.
+- [`humans.txt`](https://ytscrobbler.kuberbassi.com/humans.txt) contains creator attribution.
+- [`.well-known/security.txt`](https://ytscrobbler.kuberbassi.com/.well-known/security.txt) provides responsible disclosure contacts.
+
 ## License
 
 [MIT](LICENSE)

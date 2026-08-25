@@ -1,0 +1,6 @@
+Contact: mailto:me@kuberbassi.com
+Contact: https://github.com/kuberbassi/ytmusic-scrobbler/security/advisories/new
+Canonical: https://ytscrobbler.kuberbassi.com/.well-known/security.txt
+Policy: https://github.com/kuberbassi/ytmusic-scrobbler/security
+Preferred-Languages: en
+Expires: 2027-08-25T23:59:59Z

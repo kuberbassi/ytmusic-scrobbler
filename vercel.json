@@ -36,6 +36,26 @@
       "dest": "/public/robots.txt"
     },
     {
+      "src": "/llms.txt",
+      "dest": "/public/llms.txt"
+    },
+    {
+      "src": "/llms-full.txt",
+      "dest": "/public/llms-full.txt"
+    },
+    {
+      "src": "/humans.txt",
+      "dest": "/public/humans.txt"
+    },
+    {
+      "src": "/site.webmanifest",
+      "dest": "/public/site.webmanifest"
+    },
+    {
+      "src": "/.well-known/security.txt",
+      "dest": "/public/security.txt"
+    },
+    {
       "src": "/api/(.*)",
       "dest": "api/index.py"
     },

@@ -1,0 +1,22 @@
+# YT Music Scrobbler
+
+> A free, open-source web application that synchronizes newly observed YouTube Music listening history with a user's Last.fm account across phones, computers, TVs, and Nest devices.
+
+YT Music Scrobbler is created and maintained by Kuber Bassi. It runs a Python backend on Vercel, stores isolated user configuration and scrobble records in Supabase, and is triggered every five minutes by an authenticated external cron job.
+
+## Primary links
+
+- [Application](https://ytscrobbler.kuberbassi.com/): Sign in, connect accounts, view status, and use the setup guide.
+- [Full product and technical context](https://ytscrobbler.kuberbassi.com/llms-full.txt): Detailed capabilities, limitations, architecture, security, setup, and creator information.
+- [Source code](https://github.com/kuberbassi/ytmusic-scrobbler): MIT-licensed repository.
+- [Privacy policy](https://ytscrobbler.kuberbassi.com/privacy): Data handling and privacy terms.
+- [Terms](https://ytscrobbler.kuberbassi.com/terms): Service terms.
+
+## Important facts
+
+- Automatic synchronization continues when the browser tab is closed.
+- The scheduler attempts eligible users every five minutes.
+- Last.fm secrets, session keys, and YouTube Music headers are server-side secrets and are never intentionally exposed in public responses.
+- YouTube Music provides a recent-history snapshot without reliable playback timestamps or duration.
+- The service prevents duplicate submissions, but cannot identify every legitimate replay of an already-known track without a playback-aware companion.
+- This is an independent project and is not affiliated with Google, YouTube, or Last.fm.

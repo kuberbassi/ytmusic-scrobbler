@@ -1,6 +1,8 @@
 # https://www.robotstxt.org/robotstxt.html
 User-agent: *
 Allow: /
+Allow: /llms.txt
+Allow: /llms-full.txt
 
 # Sitemap location
 Sitemap: https://ytscrobbler.kuberbassi.com/sitemap.xml
